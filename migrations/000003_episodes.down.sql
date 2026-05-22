@@ -1,0 +1,11 @@
+DROP INDEX IF EXISTS idx_episode_embeddings_vector;
+DROP TABLE IF EXISTS episode_embeddings;
+DROP INDEX IF EXISTS idx_episode_semantic_pending;
+DROP TABLE IF EXISTS episode_semantic;
+DROP INDEX IF EXISTS idx_episode_messages_episode;
+DROP INDEX IF EXISTS idx_episode_messages_msg;
+DROP TABLE IF EXISTS episode_messages;
+DROP INDEX IF EXISTS idx_episodes_pending_importance;
+DROP INDEX IF EXISTS idx_episodes_type;
+DROP INDEX IF EXISTS idx_episodes_chat_time;
+DROP TABLE IF EXISTS episodes;

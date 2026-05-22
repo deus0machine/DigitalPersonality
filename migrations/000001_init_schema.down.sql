@@ -1,0 +1,11 @@
+DROP INDEX IF EXISTS idx_embeddings_vector;
+DROP TABLE IF EXISTS embeddings;
+DROP TABLE IF EXISTS sync_cursors;
+DROP INDEX IF EXISTS idx_messages_text_trgm;
+DROP INDEX IF EXISTS idx_messages_sent_at;
+DROP INDEX IF EXISTS idx_messages_sender_id;
+DROP INDEX IF EXISTS idx_messages_chat_id;
+DROP TABLE IF EXISTS messages;
+DROP TABLE IF EXISTS chats;
+DROP INDEX IF EXISTS idx_users_username;
+DROP TABLE IF EXISTS users;
