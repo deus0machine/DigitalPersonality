@@ -6,12 +6,14 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
 	"sync/atomic"
 	"time"
 
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/auth"
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 	"go.uber.org/zap"
 
 	"github.com/digital-personality/internal/application/port"
@@ -26,8 +28,9 @@ const (
 // Client wraps gotd/td and implements port.TelegramGateway.
 // It is safe to call Dialogs/History/Self concurrently once Run has invoked its handler.
 type Client struct {
-	cfg config.TelegramConfig
-	log *slog.Logger
+	cfg     config.TelegramConfig
+	syncCfg config.SyncConfig
+	log     *slog.Logger
 
 	// td and api are populated inside Run() before fn is called.
 	td  atomic.Pointer[telegram.Client]
@@ -38,8 +41,8 @@ type Client struct {
 }
 
 // New constructs a Client. Call Run to activate the MTProto connection.
-func New(cfg config.TelegramConfig, log *slog.Logger) *Client {
-	return &Client{cfg: cfg, log: log}
+func New(cfg config.TelegramConfig, syncCfg config.SyncConfig, log *slog.Logger) *Client {
+	return &Client{cfg: cfg, syncCfg: syncCfg, log: log}
 }
 
 // Run connects to Telegram via MTProto, authenticates (or loads saved session),
@@ -170,23 +173,84 @@ func (c *Client) ListDialogs(ctx context.Context) ([]port.DialogInfo, error) {
 }
 
 // GetHistory returns one page of message history for the given dialog.
+// Transparently retries on FLOOD_WAIT with exponential backoff.
+// Non-flood errors are returned immediately without retry.
 func (c *Client) GetHistory(ctx context.Context, req port.HistoryRequest) (*port.HistoryPage, error) {
 	limit := req.Limit
 	if limit <= 0 {
 		limit = historyPageLimit
 	}
 
-	resp, err := c.mustAPI().MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
+	tgReq := &tg.MessagesGetHistoryRequest{
 		Peer:     inputPeerFromDialog(req.Dialog),
 		OffsetID: int(req.OffsetID),
 		Limit:    limit,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("MessagesGetHistory chat=%d offset=%d: %w",
-			req.Dialog.ID, req.OffsetID, err)
 	}
 
+	resp, err := c.fetchHistoryWithRetry(ctx, req.Dialog.ID, req.OffsetID, tgReq)
+	if err != nil {
+		return nil, err
+	}
 	return c.buildHistoryPage(resp)
+}
+
+// fetchHistoryWithRetry calls MessagesGetHistory and retries on FLOOD_WAIT.
+// Sleep on each retry = floodWait * multiplier^(attempt-1) + jitter.
+// Non-FLOOD_WAIT errors propagate immediately without consuming retries.
+func (c *Client) fetchHistoryWithRetry(
+	ctx context.Context,
+	chatID, offset int64,
+	req *tg.MessagesGetHistoryRequest,
+) (tg.MessagesMessagesClass, error) {
+	maxRetries := c.syncCfg.FloodMaxRetries
+	if maxRetries <= 0 {
+		maxRetries = 5
+	}
+	multiplier := c.syncCfg.FloodBackoffMultiplier
+	if multiplier <= 1.0 {
+		multiplier = 1.5
+	}
+	jitter := c.syncCfg.FloodJitter
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		resp, err := c.mustAPI().MessagesGetHistory(ctx, req)
+		if err == nil {
+			if attempt > 1 {
+				c.log.Info("history retry succeeded",
+					"chat_id", chatID, "offset", offset, "attempt", attempt)
+			}
+			return resp, nil
+		}
+
+		floodDur, isFlood := tgerr.AsFloodWait(err)
+		if !isFlood {
+			return nil, fmt.Errorf("MessagesGetHistory chat=%d offset=%d: %w", chatID, offset, err)
+		}
+
+		if attempt == maxRetries {
+			return nil, fmt.Errorf("MessagesGetHistory chat=%d offset=%d flood wait: max retries (%d) exceeded: %w",
+				chatID, offset, maxRetries, err)
+		}
+
+		sleep := time.Duration(float64(floodDur)*math.Pow(multiplier, float64(attempt-1))) + jitter
+
+		c.log.Warn("history flood wait",
+			"chat_id", chatID,
+			"offset", offset,
+			"wait_seconds", int(floodDur.Seconds()),
+			"sleep", sleep.Round(time.Millisecond),
+			"attempt", attempt,
+		)
+
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(sleep):
+		}
+	}
+
+	// unreachable
+	return nil, fmt.Errorf("MessagesGetHistory chat=%d offset=%d: exhausted %d retries", chatID, offset, maxRetries)
 }
 
 func (c *Client) buildHistoryPage(resp tg.MessagesMessagesClass) (*port.HistoryPage, error) {
@@ -194,21 +258,23 @@ func (c *Client) buildHistoryPage(resp tg.MessagesMessagesClass) (*port.HistoryP
 
 	var (
 		rawMessages []tg.MessageClass
+		rawUsers    []tg.UserClass
 		total       int
 	)
 	switch v := resp.(type) {
 	case *tg.MessagesMessages:
-		rawMessages, total = v.Messages, len(v.Messages)
+		rawMessages, rawUsers, total = v.Messages, v.Users, len(v.Messages)
 	case *tg.MessagesMessagesSlice:
-		rawMessages, total = v.Messages, v.Count
+		rawMessages, rawUsers, total = v.Messages, v.Users, v.Count
 	case *tg.MessagesChannelMessages:
-		rawMessages, total = v.Messages, v.Count
+		rawMessages, rawUsers, total = v.Messages, v.Users, v.Count
 	case *tg.MessagesMessagesNotModified:
 		return &port.HistoryPage{}, nil
 	}
 
 	page := &port.HistoryPage{
-		Messages: make([]port.IncomingMessage, 0, len(rawMessages)),
+		Messages:     make([]port.IncomingMessage, 0, len(rawMessages)),
+		Participants: mapParticipants(rawUsers),
 	}
 	var minID int64
 

@@ -110,8 +110,12 @@ type HistoryRequest struct {
 // HistoryPage is one page of message history returned by GetHistory.
 type HistoryPage struct {
 	Messages []IncomingMessage
-	MinID    int64 // smallest TelegramID in this page — use as next OffsetID
-	HasMore  bool  // false when no more messages exist below MinID
+	// Participants contains all users referenced in this page (senders, reply targets, etc.).
+	// The sync engine upserts them before processing Messages to prevent FK violations
+	// on messages.sender_id. Populated from the Users slice in the Telegram API response.
+	Participants []UserInfo
+	MinID        int64 // smallest TelegramID in this page — use as next OffsetID
+	HasMore      bool  // false when no more messages exist below MinID
 }
 
 // TelegramGateway is the output port consumed by the sync application layer.

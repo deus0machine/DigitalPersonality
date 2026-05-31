@@ -128,10 +128,12 @@ func (r *episodeRepo) ListUnepisodedMessages(ctx context.Context, chatID int64, 
 		SELECT m.id, m.telegram_id, m.chat_id,
 		       COALESCE(m.sender_id, 0), COALESCE(m.reply_to_id, 0),
 		       m.text, m.raw_data, m.entities, m.reactions, m.sticker_meta,
-		       m.media_kind, m.sent_at, m.synced_at, m.is_outgoing, m.is_deleted
+		       m.media_kind, m.sent_at, m.synced_at, m.is_outgoing, m.is_deleted,
+		       m.is_forwarded, COALESCE(m.forward_from_id, 0), m.forward_date, m.edit_date
 		FROM messages m
 		WHERE m.chat_id = $1
 		  AND m.is_deleted = FALSE
+		  AND m.in_memory_window = TRUE
 		  AND NOT EXISTS (
 		      SELECT 1 FROM episode_messages em WHERE em.message_id = m.id
 		  )

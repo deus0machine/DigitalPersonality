@@ -65,7 +65,15 @@ func runCLI(args []string) error {
 		return runner.Personality(ctx, args[1:])
 	case "chats":
 		return runner.Chats(ctx)
+	case "windows":
+		return runner.Windows(ctx, args[1:])
+	case "validate":
+		return runner.Validate(ctx)
+	case "inspect-chat":
+		return runner.InspectChat(ctx, args[1:])
+	case "voice-stats":
+		return runner.VoiceStats(ctx)
 	default:
-		return fmt.Errorf("unknown command %q\n\nUsage:\n  sync                      Run Telegram backfill (default)\n  search <query>            Search messages (FTS → trigram fallback)\n  episodes <query>          Search episodes by semantic text\n  similar <text>            Find messages with similar phrasing\n  personality [chat-id]     Show personality analytics\n  chats                     List all synced chats with scores", args[0])
+		return fmt.Errorf("unknown command %q\n\nUsage:\n  sync                      Run Telegram backfill (default)\n  search <query>            Search messages (FTS → trigram fallback)\n  episodes <query>          Search episodes by semantic text\n  similar <text>            Find messages with similar phrasing\n  personality [chat-id]     Show personality analytics\n  chats                     List all synced chats with scores\n  windows [chat-id]         Show memory window coverage and sample anchors\n  validate                  Run memory quality checks and show top-20 chats\n  inspect-chat <chat-id>    Detailed per-chat diagnostic with sample windows\n  voice-stats               Voice message count and top-20 chats by voice volume", args[0])
 	}
 }

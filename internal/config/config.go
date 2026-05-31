@@ -8,11 +8,40 @@ import (
 )
 
 type Config struct {
-	App      AppConfig
-	Postgres PostgresConfig
-	Telegram TelegramConfig
-	OpenAI   OpenAIConfig
+	App       AppConfig
+	Postgres  PostgresConfig
+	Telegram  TelegramConfig
+	OpenAI    OpenAIConfig
 	Embedding EmbeddingConfig
+	Window    WindowConfig
+	Sync      SyncConfig
+}
+
+// SyncConfig controls Telegram history pagination rate limiting and FLOOD_WAIT handling.
+type SyncConfig struct {
+	// HistoryRequestDelay is the pause between consecutive GetHistory page requests
+	// within a single dialog. Acts as a proactive throttle to reduce FLOOD_WAIT frequency.
+	HistoryRequestDelay time.Duration `env:"SYNC_HISTORY_REQUEST_DELAY" envDefault:"200ms"`
+
+	// FloodMaxRetries is the maximum number of times a GetHistory call is retried
+	// after receiving a FLOOD_WAIT error before the dialog is marked as failed.
+	FloodMaxRetries int `env:"SYNC_FLOOD_MAX_RETRIES" envDefault:"5"`
+
+	// FloodJitter is added to the FLOOD_WAIT duration on every retry to prevent
+	// synchronized retry storms across multiple concurrent callers.
+	FloodJitter time.Duration `env:"SYNC_FLOOD_JITTER" envDefault:"1s"`
+
+	// FloodBackoffMultiplier scales the sleep duration on each successive retry.
+	// A value of 1.5 means each retry waits 1.5× longer than the previous one.
+	FloodBackoffMultiplier float64 `env:"SYNC_FLOOD_BACKOFF_MULT" envDefault:"1.5"`
+}
+
+// WindowConfig controls participation-window size for group/channel dialogs.
+// WindowBefore and WindowAfter define how many messages on each side of an
+// outgoing anchor are included in the semantic/personality/episodic pipelines.
+type WindowConfig struct {
+	Before int `env:"WINDOW_BEFORE" envDefault:"10"`
+	After  int `env:"WINDOW_AFTER"  envDefault:"10"`
 }
 
 type AppConfig struct {

@@ -194,6 +194,24 @@ func mapUserInfo(u *tg.User) *port.UserInfo {
 	}
 }
 
+// mapParticipants extracts real users from a history page's user list.
+// tg.UserEmpty (deleted/inaccessible accounts) are skipped — EnsureExists
+// handles any remaining FK gaps on the message insert path.
+func mapParticipants(rawUsers []tg.UserClass) []port.UserInfo {
+	if len(rawUsers) == 0 {
+		return nil
+	}
+	out := make([]port.UserInfo, 0, len(rawUsers))
+	for _, u := range rawUsers {
+		user, ok := u.(*tg.User)
+		if !ok || user.ID == 0 {
+			continue // tg.UserEmpty or zero-ID — skip
+		}
+		out = append(out, *mapUserInfo(user))
+	}
+	return out
+}
+
 // buildDialogLookups builds fast lookup maps from the dialog response slices.
 func buildDialogLookups(
 	rawUsers []tg.UserClass,

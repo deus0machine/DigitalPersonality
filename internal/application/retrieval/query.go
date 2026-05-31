@@ -71,6 +71,105 @@ type EpisodeHit struct {
 	Rank         float32
 }
 
+// WindowStat is a per-chat memory window coverage summary.
+type WindowStat struct {
+	ChatID         int64
+	ChatTitle      string
+	Surface        entity.PersonalitySurface
+	TotalMessages  int
+	InWindowCount  int
+	AnchorCount    int // outgoing messages that anchor the window
+	PendingRebuild int // in-window messages not yet in message_semantic
+}
+
+// WindowMessage is one message in a participation window preview.
+type WindowMessage struct {
+	TelegramID int64
+	Text       string
+	SentAt     time.Time
+	IsOutgoing bool
+	InWindow   bool
+}
+
+// WindowAnchor is a participation window centered on one outgoing anchor.
+// Messages are ordered chronologically; the anchor is the entry where IsOutgoing=true.
+type WindowAnchor struct {
+	Messages []WindowMessage
+}
+
+// VoiceChatEntry is one row in the per-chat voice message breakdown.
+type VoiceChatEntry struct {
+	ChatID        int64
+	Title         string
+	Surface       entity.PersonalitySurface
+	Score         float32
+	VoiceCount    int
+	OutgoingCount int
+}
+
+// VoiceStats is a global summary of voice messages across the database.
+type VoiceStats struct {
+	TotalVoice    int
+	OutgoingVoice int
+	TopChats      []VoiceChatEntry // up to 20 chats by voice count, desc
+}
+
+// ValidationStats is a global quality summary of the collected memory.
+type ValidationStats struct {
+	TotalMessages    int
+	InWindowMessages int
+	OutgoingMessages int
+	TotalEpisodes    int
+	AvgEpisodeSize   float64
+	TotalSignals     int
+	ChatsBySurface   map[string]int
+	HighScoreEmpty   []ChatSummary // chats with score > 0.8 and zero messages
+}
+
+// ChatSummary is a minimal chat descriptor used in validation warnings.
+type ChatSummary struct {
+	ChatID  int64
+	Title   string
+	Surface entity.PersonalitySurface
+	Score   float32
+}
+
+// TopChatEntry is one row in the top-N chats by message volume table.
+type TopChatEntry struct {
+	ChatID       int64
+	Title        string
+	Surface      entity.PersonalitySurface
+	Score        float32
+	Total        int
+	InWindow     int
+	Outgoing     int
+	EpisodeCount int
+}
+
+// EpisodeEntry is a single episode record used in diagnostic output.
+type EpisodeEntry struct {
+	EpisodeID    int64
+	StartedAt    time.Time
+	EndedAt      time.Time
+	MessageCount int
+}
+
+// ChatInspectReport is a detailed per-chat diagnostic snapshot.
+type ChatInspectReport struct {
+	ChatID       int64
+	Title        string
+	Surface      entity.PersonalitySurface
+	Score        float32
+	Total        int
+	Outgoing     int
+	InWindow     int
+	EpisodeCount    int
+	EpisodeMin      int
+	EpisodeAvg      float64
+	EpisodeMax      int
+	LargestEpisodes []EpisodeEntry
+}
+
 // PersonalityReport is a per-chat analytics snapshot.
 type PersonalityReport struct {
 	ChatID   int64

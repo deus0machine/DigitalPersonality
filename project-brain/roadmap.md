@@ -49,12 +49,30 @@
 - `cmd/server` роутинг: os.Args[1] → CLI или sync
 - ADR-0005: CLI-first, inspectability > embeddings
 
+### Phase 4.9 — Sender Integrity Fix
+- FK violation `messages_sender_id_fkey` устранён для групп, личных чатов, каналов
+- `HistoryPage.Participants`: извлекаем `v.Users` из каждого API response
+- `upsertParticipants`: bulk upsert до обработки страницы сообщений
+- `UserRepository.EnsureExists`: belt-and-suspenders fallback
+
+### Phase 4.10 — Participation-Centered Memory Windows
+- `in_memory_window BOOLEAN DEFAULT TRUE` на messages (migration 000006, zero breaking change)
+- `WindowRepository`: `ComputeParticipationWindows` (3-step atomic SQL) + `ListPendingRebuild`
+- `WindowExpander` use case: compute → retroactive Layer 2-3 rebuild (batched, idempotent)
+- `WindowConfig`: `WINDOW_BEFORE=10`, `WINDOW_AFTER=10` (env vars)
+- Sync engine: `needsWindowing(surface)` gate → `ComputeAndRebuild` после sync, до episodes
+- Retrieval layer: `AND m.in_memory_window = TRUE` во всех message queries
+- Episode builder: `AND m.in_memory_window = TRUE` в `ListUnepisodedMessages`
+- Embedding pipeline: `ListPendingEmbedding` JOIN messages + window filter (no orphan embeddings)
+- CLI: `windows` + `windows <chat-id>` — coverage table, anchor preview, pending rebuild indicator
+- SQL toolkit: `docs/sql/inspect_windows.sql` — 8 inspection + 7 validation queries
+
 ---
 
 ## Текущее
 
-Phase 4.8 завершена. CLI delivery layer позволяет инспектировать память через консоль.
-Следующий шаг: валидировать retrieval на реальных данных, затем Phase 5.
+Phase 4.10 завершена. Participation-centered memory windows полностью интегрированы.
+Следующий шаг: запустить sync на реальных данных, валидировать через `windows` CLI и SQL queries, затем Phase 5.
 
 ---
 

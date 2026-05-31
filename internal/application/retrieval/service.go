@@ -73,6 +73,77 @@ func (s *Service) AllReports(ctx context.Context) ([]PersonalityReport, error) {
 	return reports, nil
 }
 
+// WindowStats returns per-chat memory window coverage statistics.
+// chatID=0 returns stats for all chats.
+func (s *Service) WindowStats(ctx context.Context, chatID int64) ([]WindowStat, error) {
+	stats, err := s.repo.WindowStats(ctx, chatID)
+	if err != nil {
+		return nil, fmt.Errorf("window stats: %w", err)
+	}
+	return stats, nil
+}
+
+// WindowAnchors returns sample participation windows for a chat.
+func (s *Service) WindowAnchors(ctx context.Context, chatID int64, windowBefore, windowAfter, anchorLimit int) ([]WindowAnchor, error) {
+	anchors, err := s.repo.WindowAnchors(ctx, chatID, windowBefore, windowAfter, anchorLimit)
+	if err != nil {
+		return nil, fmt.Errorf("window anchors chat=%d: %w", chatID, err)
+	}
+	return anchors, nil
+}
+
+// WindowAnchorsDistributed returns up to 3 participation windows distributed
+// across the full temporal span of the chat (early / middle / late).
+func (s *Service) WindowAnchorsDistributed(ctx context.Context, chatID int64, windowBefore, windowAfter int) ([]WindowAnchor, error) {
+	anchors, err := s.repo.WindowAnchorsDistributed(ctx, chatID, windowBefore, windowAfter)
+	if err != nil {
+		return nil, fmt.Errorf("window anchors distributed chat=%d: %w", chatID, err)
+	}
+	return anchors, nil
+}
+
+// Validate returns global quality metrics for the collected memory.
+func (s *Service) Validate(ctx context.Context) (*ValidationStats, error) {
+	v, err := s.repo.ValidationStats(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("validation stats: %w", err)
+	}
+	return v, nil
+}
+
+// TopChatsByVolume returns up to limit chats ranked by message volume.
+func (s *Service) TopChatsByVolume(ctx context.Context, limit int) ([]TopChatEntry, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	entries, err := s.repo.TopChatsByVolume(ctx, limit)
+	if err != nil {
+		return nil, fmt.Errorf("top chats by volume: %w", err)
+	}
+	return entries, nil
+}
+
+// InspectChat returns a detailed per-chat diagnostic snapshot.
+func (s *Service) InspectChat(ctx context.Context, chatID int64) (*ChatInspectReport, error) {
+	if chatID == 0 {
+		return nil, fmt.Errorf("chatID is required")
+	}
+	r, err := s.repo.ChatInspect(ctx, chatID)
+	if err != nil {
+		return nil, fmt.Errorf("inspect chat %d: %w", chatID, err)
+	}
+	return r, nil
+}
+
+// VoiceStats returns the global voice message count and top-20 chats by voice volume.
+func (s *Service) VoiceStats(ctx context.Context) (*VoiceStats, error) {
+	v, err := s.repo.VoiceStats(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("voice stats: %w", err)
+	}
+	return v, nil
+}
+
 func applyDefaults(q Query) Query {
 	if q.Limit <= 0 {
 		q.Limit = defaultLimit

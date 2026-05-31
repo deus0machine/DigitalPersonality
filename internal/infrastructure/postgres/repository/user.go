@@ -60,6 +60,16 @@ func (r *userRepo) GetByID(ctx context.Context, id int64) (*entity.User, error) 
 	return u, nil
 }
 
+func (r *userRepo) EnsureExists(ctx context.Context, id int64) error {
+	// INSERT ... DO NOTHING guarantees the row exists without overwriting real data.
+	const q = `INSERT INTO users (id) VALUES ($1) ON CONFLICT (id) DO NOTHING`
+	_, err := r.pool.Exec(ctx, q, id)
+	if err != nil {
+		return fmt.Errorf("ensure user exists %d: %w", id, err)
+	}
+	return nil
+}
+
 func (r *userRepo) GetSelf(ctx context.Context) (*entity.User, error) {
 	const q = `
 		SELECT id, COALESCE(username,''), first_name, last_name,

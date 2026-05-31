@@ -63,12 +63,18 @@ func (r *semanticRepo) GetByMessageID(ctx context.Context, messageID int64) (*en
 
 // ListPendingEmbedding returns message IDs with a semantic document that:
 // - has skip_embedding = FALSE
+// - is in the memory window (in_memory_window = TRUE)
 // - has no matching entry in the embeddings table for the given model
+// The in_memory_window filter prevents embedding orphan docs for messages that
+// were windowed out after window computation (social/passive_consumption surfaces).
 func (r *semanticRepo) ListPendingEmbedding(ctx context.Context, model string, limit int) ([]int64, error) {
 	const q = `
 		SELECT ms.message_id
 		FROM message_semantic ms
+		JOIN messages m ON m.id = ms.message_id
 		WHERE ms.skip_embedding = FALSE
+		  AND m.in_memory_window = TRUE
+		  AND NOT m.is_deleted
 		  AND NOT EXISTS (
 		      SELECT 1 FROM embeddings e
 		      WHERE e.message_id = ms.message_id AND e.model = $1

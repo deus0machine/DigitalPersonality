@@ -26,7 +26,18 @@ Go-система для построения цифровой личности 
 - **Структура**: `cmd/` → `internal/{domain,application,infrastructure,interfaces}`
 - **Запуск sync**: `docker compose up -d && go run ./cmd/server`
 - **CLI inspect**: `go run ./cmd/server search "текст"` (без Telegram creds)
-- **Все команды**: `search`, `episodes`, `similar`, `personality [id]`, `chats`
+- **Все команды**: `search`, `episodes`, `similar`, `personality [id]`, `chats`, `windows [id]`
+
+## Memory Window Architecture (Phase 4.10)
+
+Группы и каналы содержат много шума — только сообщения около точек участия нужны.
+Решение: `in_memory_window BOOLEAN DEFAULT TRUE` на `messages`.
+
+- **social / passive_consumption** → windowed: только ±10 сообщений вокруг исходящих anchor-ов
+- **interpersonal / self_expression / tool_interaction** → full-sync: флаг всегда TRUE
+- После sync: `WindowExpander.ComputeAndRebuild` → retroactive Layer 2-3 rebuild
+- SQL validation toolkit: `docs/sql/inspect_windows.sql`
+- CLI валидация: `go run ./cmd/server windows` / `windows <chat-id>`
 
 ## Архитектурный принцип
 

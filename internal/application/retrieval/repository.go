@@ -21,4 +21,29 @@ type Repository interface {
 
 	// AllPersonalityReports returns one report per synced chat, ordered by relevance.
 	AllPersonalityReports(ctx context.Context) ([]PersonalityReport, error)
+
+	// WindowStats returns per-chat memory window coverage statistics.
+	// chatID=0 returns stats for all chats that have at least one message.
+	WindowStats(ctx context.Context, chatID int64) ([]WindowStat, error)
+
+	// WindowAnchors returns sample participation windows for a chat.
+	// Returns up to anchorLimit anchors, each with up to windowBefore/windowAfter context messages.
+	WindowAnchors(ctx context.Context, chatID int64, windowBefore, windowAfter, anchorLimit int) ([]WindowAnchor, error)
+
+	// WindowAnchorsDistributed returns up to 3 participation windows sampled across
+	// the full temporal range of a chat: early (~10th percentile), middle (~50th),
+	// and late (last anchor). Provides better coverage than consecutive-first sampling.
+	WindowAnchorsDistributed(ctx context.Context, chatID int64, windowBefore, windowAfter int) ([]WindowAnchor, error)
+
+	// ValidationStats returns global quality metrics across all collected memory.
+	ValidationStats(ctx context.Context) (*ValidationStats, error)
+
+	// TopChatsByVolume returns up to limit chats ordered by total message count.
+	TopChatsByVolume(ctx context.Context, limit int) ([]TopChatEntry, error)
+
+	// ChatInspect returns a detailed diagnostic snapshot for a single chat.
+	ChatInspect(ctx context.Context, chatID int64) (*ChatInspectReport, error)
+
+	// VoiceStats returns the global voice message count and per-chat breakdown.
+	VoiceStats(ctx context.Context) (*VoiceStats, error)
 }

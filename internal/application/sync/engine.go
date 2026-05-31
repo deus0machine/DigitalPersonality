@@ -11,6 +11,7 @@ import (
 
 	"github.com/digital-personality/internal/application/episode"
 	"github.com/digital-personality/internal/application/port"
+	appwindow "github.com/digital-personality/internal/application/window"
 	"github.com/digital-personality/internal/domain/entity"
 	"github.com/digital-personality/internal/domain/repository"
 )
@@ -18,6 +19,7 @@ import (
 const (
 	defaultBatchSize   = 100
 	defaultDialogDelay = 150 * time.Millisecond
+	defaultHistoryDelay = 200 * time.Millisecond
 )
 
 // Engine orchestrates the Telegram backfill pipeline across all four memory layers:
@@ -31,6 +33,7 @@ type Engine struct {
 	normalizer     port.SemanticNormalizer
 	extractor      port.PersonalityExtractor
 	episodeBuilder *episode.Builder
+	windowExpander *appwindow.Expander
 	scorer         *ChatRelevanceScorer
 	msgRepo        repository.MessageRepository
 	chatRepo       repository.ChatRepository
@@ -39,6 +42,7 @@ type Engine struct {
 	personRepo     repository.PersonalityRepository
 	log            *slog.Logger
 	batchSize      int
+	historyDelay   time.Duration
 }
 
 // NewEngine constructs a sync Engine. All parameters are required.
@@ -47,19 +51,25 @@ func NewEngine(
 	normalizer port.SemanticNormalizer,
 	extractor port.PersonalityExtractor,
 	episodeBuilder *episode.Builder,
+	windowExpander *appwindow.Expander,
 	scorer *ChatRelevanceScorer,
 	msgRepo repository.MessageRepository,
 	chatRepo repository.ChatRepository,
 	userRepo repository.UserRepository,
 	semanticRepo repository.SemanticRepository,
 	personRepo repository.PersonalityRepository,
+	historyDelay time.Duration,
 	log *slog.Logger,
 ) *Engine {
+	if historyDelay <= 0 {
+		historyDelay = defaultHistoryDelay
+	}
 	return &Engine{
 		gateway:        gateway,
 		normalizer:     normalizer,
 		extractor:      extractor,
 		episodeBuilder: episodeBuilder,
+		windowExpander: windowExpander,
 		scorer:         scorer,
 		msgRepo:        msgRepo,
 		chatRepo:       chatRepo,
@@ -68,6 +78,7 @@ func NewEngine(
 		personRepo:     personRepo,
 		log:            log,
 		batchSize:      defaultBatchSize,
+		historyDelay:   historyDelay,
 	}
 }
 
@@ -120,12 +131,12 @@ func (e *Engine) RunBackfill(ctx context.Context) error {
 		}
 
 		// Log scoring summary grouped by surface.
-		var toSync []port.DialogInfo
+		var toSync []scored
 		surfaceCount := map[entity.PersonalitySurface]int{}
 		for _, s := range all {
 			surfaceCount[s.relevance.Surface]++
 			if s.relevance.ShouldSync() {
-				toSync = append(toSync, s.dialog)
+				toSync = append(toSync, s)
 			} else {
 				e.log.Debug("dialog excluded by scorer",
 					"chat_id", s.dialog.ID,
@@ -147,24 +158,34 @@ func (e *Engine) RunBackfill(ctx context.Context) error {
 		)
 
 		var synced, failed int
-		for _, d := range toSync {
+		for _, s := range toSync {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
 			default:
 			}
 
-			if err := e.syncDialogMessages(ctx, d); err != nil {
+			if err := e.syncDialogMessages(ctx, s.dialog); err != nil {
 				e.log.Error("dialog sync failed",
-					"chat_id", d.ID, "title", d.Title, "error", err)
+					"chat_id", s.dialog.ID, "title", s.dialog.Title, "error", err)
 				failed++
 				continue
 			}
 
+			// Window computation: runs before episode building so that retroactive
+			// Layer 2-3 rebuild populates data that the episode builder will segment.
+			if needsWindowing(s.relevance.Surface) {
+				if err := e.windowExpander.ComputeAndRebuild(ctx, s.dialog.ID); err != nil {
+					e.log.Warn("window compute+rebuild failed",
+						"chat_id", s.dialog.ID, "error", err)
+					// Non-fatal: window flags can be recomputed on next sync pass.
+				}
+			}
+
 			// Layer 4: segment new messages into episodes.
-			if err := e.episodeBuilder.BuildForDialog(ctx, d.ID); err != nil {
+			if err := e.episodeBuilder.BuildForDialog(ctx, s.dialog.ID); err != nil {
 				e.log.Warn("episode building failed",
-					"chat_id", d.ID, "error", err)
+					"chat_id", s.dialog.ID, "error", err)
 				// Non-fatal: episodes can be rebuilt; don't abort the dialog.
 			}
 
@@ -225,6 +246,11 @@ func (e *Engine) syncDialogMessages(ctx context.Context, dialog port.DialogInfo)
 			break
 		}
 
+		// Upsert all participants from this page BEFORE processing messages.
+		// This prevents FK violations on messages.sender_id for group members,
+		// private chat peers, and signed channel authors.
+		e.upsertParticipants(ctx, page.Participants)
+
 		reachedCursor := false
 		for i := range page.Messages {
 			incoming := &page.Messages[i]
@@ -249,6 +275,13 @@ func (e *Engine) syncDialogMessages(ctx context.Context, dialog port.DialogInfo)
 			break
 		}
 		offsetID = page.MinID
+
+		// Proactive throttle between page requests to reduce FLOOD_WAIT probability.
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(e.historyDelay):
+		}
 	}
 
 	if maxIDSeen > 0 {
@@ -263,10 +296,40 @@ func (e *Engine) syncDialogMessages(ctx context.Context, dialog port.DialogInfo)
 	return nil
 }
 
+// upsertParticipants persists all users from a history page response.
+// Called once per page, before messages, to satisfy the messages.sender_id FK.
+// Individual failures are warnings only — the EnsureExists fallback in ingestMessage
+// covers the rare cases that slip through (deleted accounts, partial responses).
+func (e *Engine) upsertParticipants(ctx context.Context, participants []port.UserInfo) {
+	for _, p := range participants {
+		if p.ID == 0 {
+			continue
+		}
+		if err := e.userRepo.Upsert(ctx, &entity.User{
+			ID:        p.ID,
+			Username:  p.Username,
+			FirstName: p.FirstName,
+			LastName:  p.LastName,
+		}); err != nil {
+			e.log.Warn("upsert participant failed", "user_id", p.ID, "error", err)
+		}
+	}
+}
+
 // ingestMessage writes one message across all three memory layers.
 // The three operations are independent: semantic/personality failures are logged
 // but don't block message persistence (raw layer is authoritative).
 func (e *Engine) ingestMessage(ctx context.Context, incoming *port.IncomingMessage) error {
+	// FK safety: sender must exist in users before message insert.
+	// Participants are upserted in bulk before each page; this is a fallback
+	// for deleted accounts and edge cases not included in the participants list.
+	if incoming.SenderID != 0 {
+		if err := e.userRepo.EnsureExists(ctx, incoming.SenderID); err != nil {
+			e.log.Debug("ensure sender exists failed",
+				"sender_id", incoming.SenderID, "error", err)
+		}
+	}
+
 	// ── Layer 1: Raw ─────────────────────────────────────────────────────────
 	msg := portToEntity(incoming)
 	saved, err := e.msgRepo.Upsert(ctx, msg)
@@ -291,6 +354,14 @@ func (e *Engine) ingestMessage(ctx context.Context, incoming *port.IncomingMessa
 	}
 
 	return nil
+}
+
+// needsWindowing reports whether a dialog surface uses participation-window
+// filtering rather than full-sync. Social and PassiveConsumption surfaces
+// contain messages from many participants; only outgoing-anchor neighbourhoods
+// are relevant to personality/semantic pipelines.
+func needsWindowing(surface entity.PersonalitySurface) bool {
+	return surface == entity.SurfaceSocial || surface == entity.SurfacePassiveConsumption
 }
 
 // portToEntity converts an IncomingMessage port DTO to a domain entity.

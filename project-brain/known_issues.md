@@ -4,6 +4,16 @@
 
 ## Telegram Edge Cases
 
+### KI-000 — RESOLVED: sender_id FK violation
+**Была проблема**: `messages_sender_id_fkey` нарушалась для участников групп и peer в личных чатах.
+**Решение (2026-05-27)**:
+- `HistoryPage.Participants []UserInfo` — извлекаем `v.Users` из каждого API response
+- `upsertParticipants()` — upsert всех участников страницы до обработки сообщений
+- `UserRepository.EnsureExists()` — fallback `INSERT ... ON CONFLICT DO NOTHING` для edge cases
+- `mapParticipants()` — фильтрует `*tg.UserEmpty` (deleted accounts)
+
+---
+
 ### KI-001 — SenderID = 0 для анонимных постов
 **Проблема**: в каналах и некоторых группах `msg.FromID` отсутствует. `resolveSenderID` возвращает 0.
 **Текущее поведение**: sender_id хранится как NULL (через nullInt64(0)).
@@ -16,11 +26,17 @@
 **Риск**: ChatTitle в MessageHit может быть пустым.
 **Решение**: COALESCE в запросах, пустая строка как default.
 
-### KI-003 — Flood wait (420)
-**Проблема**: Telegram API ограничивает частоту запросов.
-**Текущее поведение**: gotd/td обрабатывает FloodWait автоматически с backoff.
-**Риск**: очень длинный backfill может занять часы.
-**Решение**: `defaultDialogDelay = 150ms` между диалогами, gotd обрабатывает остальное.
+### KI-003 — RESOLVED: Flood wait (420)
+**Была проблема**: `MessagesGetHistory` при FLOOD_WAIT помечал весь dialog как failed.
+Большие ценные диалоги пропускались полностью, backfill становился неполным.
+**Решение (2026-05-30)**:
+- `fetchHistoryWithRetry` в `telegram/client.go` — retry с exponential backoff
+- `tgerr.AsFloodWait(err)` — правильное определение FLOOD_WAIT (не как ошибки бизнес-логики)
+- Формула sleep: `floodWait × multiplier^(attempt-1) + jitter`
+- Лог WARN до исчерпания retries, лог ERROR только при окончательном провале
+- Проактивный throttle: `SYNC_HISTORY_REQUEST_DELAY=200ms` между page requests
+- Конфиг: `SYNC_FLOOD_MAX_RETRIES`, `SYNC_FLOOD_JITTER`, `SYNC_FLOOD_BACKOFF_MULT`
+- ADR-0006 описывает полное решение и trade-offs
 
 ### KI-004 — Sticker set name
 **Проблема**: `DocumentAttributeSticker.Stickerset` возвращает InputStickerSetID, не имя.
@@ -111,6 +127,36 @@
 **Текущее поведение**: компактная таблица (одна строка на чат) — это намеренно.
 **Риск**: при большом числе чатов всё равно может быть длинный вывод.
 **Решение**: добавить `--limit N` или пагинацию — при необходимости в Phase 5.
+
+---
+
+## Memory Window Architecture
+
+### KI-019 — Orphan semantic docs (non-critical)
+**Проблема**: при первом запуске `ComputeParticipationWindows` для social/passive_consumption чата,
+некоторые сообщения получают `in_memory_window = FALSE`, но их записи в `message_semantic` остаются.
+**Текущее поведение**: orphan docs не попадают в retrieval queries (filter `in_memory_window=TRUE`)
+и не embed'ятся (`ListPendingEmbedding` теперь JOIN с messages + фильтр `in_memory_window`).
+**Риск**: небольшое занятое место в `message_semantic`. Не влияет на корректность.
+**Проверка**: V5 в `docs/sql/inspect_windows.sql` покажет count orphan docs.
+**Решение**: плановая чистка `DELETE FROM message_semantic WHERE message_id IN (SELECT id FROM messages WHERE NOT in_memory_window)` — при необходимости.
+
+### KI-020 — Personality signals для out-of-window сообщений (исторические)
+**Проблема**: до windowing все сообщения проходили Layer 3. После первого compute,
+сигналы для non-window сообщений остаются в `personality_signals`.
+**Текущее поведение**: новые сигналы для non-window сообщений не создаются (sync/engine.go
+не вызывает extractor для non-window messages после rebuild). Старые остаются.
+**Риск**: небольшое искажение personality аналитики для social чатов.
+**Проверка**: V4 в `docs/sql/inspect_windows.sql`.
+**Решение**: при необходимости — `DELETE FROM personality_signals WHERE message_id IN (SELECT id FROM messages WHERE NOT in_memory_window)`.
+
+### KI-021 — Window computation не запускается для passive_consumption (score < threshold)
+**Проблема**: подписные broadcast каналы имеют score 0.10 — ниже SyncThreshold 0.35.
+Они никогда не синхронизируются, поэтому `ComputeAndRebuild` для них не вызывается.
+**Текущее поведение**: если чат когда-либо был синхронизирован (вручную или при изменении threshold),
+его сообщения имеют `in_memory_window = TRUE` по default. Window computation не запускался.
+**Риск**: passive_consumption чаты без windowing проходят через retrieval как будто full-sync.
+**Решение**: можно снизить SyncThreshold для passive_consumption — отложено. V7 в SQL toolkit покажет такие чаты.
 
 ---
 

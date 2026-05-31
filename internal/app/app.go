@@ -12,6 +12,7 @@ import (
 
 	appepisode "github.com/digital-personality/internal/application/episode"
 	"github.com/digital-personality/internal/application/sync"
+	appwindow "github.com/digital-personality/internal/application/window"
 	"github.com/digital-personality/internal/config"
 	infraepisode "github.com/digital-personality/internal/infrastructure/episode"
 	"github.com/digital-personality/internal/infrastructure/normalizer"
@@ -53,9 +54,10 @@ func (a *App) Run(ctx context.Context) error {
 	semanticRepo := pgrepo.NewSemanticRepository(a.db.Pool)
 	personRepo := pgrepo.NewPersonalityRepository(a.db.Pool)
 	episodeRepo := pgrepo.NewEpisodeRepository(a.db.Pool)
+	windowRepo := pgrepo.NewWindowRepository(a.db.Pool)
 
 	// ── Infrastructure: Telegram gateway ──────────────────────────────────────
-	tgClient := tginfra.New(a.cfg.Telegram, a.log)
+	tgClient := tginfra.New(a.cfg.Telegram, a.cfg.Sync, a.log)
 
 	// ── Infrastructure: normalizer + personality extractor ───────────────────
 	// Both are pure CPU-bound implementations — no I/O, safe to construct inline.
@@ -65,6 +67,14 @@ func (a *App) Run(ctx context.Context) error {
 
 	// ── Application: episode builder ──────────────────────────────────────────
 	episodeBuilder := appepisode.NewBuilder(episodeRepo, segmenter, textNormalizer, a.log)
+
+	// ── Application: window expander ──────────────────────────────────────────
+	windowExpander := appwindow.NewExpander(
+		windowRepo, semanticRepo, personRepo,
+		textNormalizer, signalExtractor,
+		a.cfg.Window.Before, a.cfg.Window.After,
+		a.log,
+	)
 
 	// ── Application: relevance scorer ────────────────────────────────────────
 	// Scores each dialog 0.0–1.0 based on ownership signals and chat type.
@@ -77,12 +87,14 @@ func (a *App) Run(ctx context.Context) error {
 		textNormalizer,
 		signalExtractor,
 		episodeBuilder,
+		windowExpander,
 		scorer,
 		msgRepo,
 		chatRepo,
 		userRepo,
 		semanticRepo,
 		personRepo,
+		a.cfg.Sync.HistoryRequestDelay,
 		a.log,
 	)
 
