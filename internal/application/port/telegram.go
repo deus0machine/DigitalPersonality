@@ -6,10 +6,28 @@ package port
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/digital-personality/internal/domain/entity"
 )
+
+// ─── Transcription error sentinels ───────────────────────────────────────────
+// Defined here so application layer (transcription.Worker) can classify errors
+// via errors.Is without importing gotd/td tgerr types.
+
+// ErrTranscriptionPending is returned when Telegram has not yet completed ASR
+// after all configured poll attempts. The message should be retried in the next run.
+var ErrTranscriptionPending = errors.New("transcription still pending")
+
+// ErrTranscriptionPermanent is returned when the transcription has permanently
+// failed for this specific message (MSG_VOICE_MISSING, TRANSCRIPTION_FAILED,
+// MSG_ID_INVALID, PEER_ID_INVALID). Retrying will not help.
+var ErrTranscriptionPermanent = errors.New("transcription permanently failed")
+
+// ErrPremiumRequired is returned when the account does not have Telegram Premium.
+// The worker should abort the entire run — retrying individual messages is pointless.
+var ErrPremiumRequired = errors.New("Telegram Premium required")
 
 // ─── Telegram DTO types ───────────────────────────────────────────────────────
 // These types live at the port boundary: rich enough to carry all personality
@@ -140,4 +158,23 @@ type TelegramGateway interface {
 	// GetHistory returns one page of message history for a dialog.
 	// Messages are ordered newest-first within the page.
 	GetHistory(ctx context.Context, req HistoryRequest) (*HistoryPage, error)
+}
+
+// VoiceTranscriber transcribes voice messages via Telegram Premium STT.
+// Implemented by infrastructure/telegram.Client.
+// Must be called from within a TelegramGateway.Run handler (live session required).
+//
+// Error semantics:
+//   - ErrTranscriptionPending: Telegram did not finish within PollAttempts. No mark written.
+//   - ErrTranscriptionPermanent: permanent per-message failure. Caller should mark as done.
+//   - ErrPremiumRequired: account lacks Premium. Caller should abort the entire run.
+//   - other errors: transient (network, flood, server). Caller should skip without marking.
+type VoiceTranscriber interface {
+	TranscribeVoice(
+		ctx           context.Context,
+		chatType      entity.ChatType,
+		chatID        int64,
+		accessHash    int64,
+		telegramMsgID int,
+	) (transcript string, err error)
 }

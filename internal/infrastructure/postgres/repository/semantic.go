@@ -61,6 +61,26 @@ func (r *semanticRepo) GetByMessageID(ctx context.Context, messageID int64) (*en
 	return doc, nil
 }
 
+// MarkTranscribed sets the transcription result on an existing message_semantic row.
+// transcript="" records a permanent failure — the row won't be retried by the worker.
+// The WHERE guard ensures idempotency: a second call after transcribed_at is set is a no-op.
+func (r *semanticRepo) MarkTranscribed(ctx context.Context, messageID int64, transcript string, tokenCount int) error {
+	const q = `
+		UPDATE message_semantic
+		SET normalized_text = $2,
+		    token_count      = $3,
+		    skip_embedding   = ($3 < 3),
+		    transcribed_at   = NOW()
+		WHERE message_id      = $1
+		  AND transcribed_at IS NULL`
+
+	_, err := r.pool.Exec(ctx, q, messageID, transcript, tokenCount)
+	if err != nil {
+		return fmt.Errorf("mark transcribed msg=%d: %w", messageID, err)
+	}
+	return nil
+}
+
 // ListPendingEmbedding returns message IDs with a semantic document that:
 // - has skip_embedding = FALSE
 // - is in the memory window (in_memory_window = TRUE)

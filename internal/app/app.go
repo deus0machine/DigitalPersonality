@@ -12,6 +12,7 @@ import (
 
 	appepisode "github.com/digital-personality/internal/application/episode"
 	"github.com/digital-personality/internal/application/sync"
+	"github.com/digital-personality/internal/application/transcription"
 	appwindow "github.com/digital-personality/internal/application/window"
 	"github.com/digital-personality/internal/config"
 	infraepisode "github.com/digital-personality/internal/infrastructure/episode"
@@ -57,7 +58,7 @@ func (a *App) Run(ctx context.Context) error {
 	windowRepo := pgrepo.NewWindowRepository(a.db.Pool)
 
 	// ── Infrastructure: Telegram gateway ──────────────────────────────────────
-	tgClient := tginfra.New(a.cfg.Telegram, a.cfg.Sync, a.log)
+	tgClient := tginfra.New(a.cfg.Telegram, a.cfg.Sync, a.cfg.Transcription, a.log)
 
 	// ── Infrastructure: normalizer + personality extractor ───────────────────
 	// Both are pure CPU-bound implementations — no I/O, safe to construct inline.
@@ -133,6 +134,30 @@ func (a *App) shutdown() {
 	if a.db != nil {
 		a.db.Close()
 	}
+}
+
+// RunTranscribe runs the voice transcription backfill inside a live MTProto session.
+// It processes all in-window voice messages that have not yet been transcribed.
+// Safe to interrupt and re-run — transcribed_at IS NULL is the idempotent guard.
+func (a *App) RunTranscribe(ctx context.Context) error {
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if err := a.initDB(ctx); err != nil {
+		return fmt.Errorf("init db: %w", err)
+	}
+	defer a.shutdown()
+
+	semanticRepo := pgrepo.NewSemanticRepository(a.db.Pool)
+	tgClient := tginfra.New(a.cfg.Telegram, a.cfg.Sync, a.cfg.Transcription, a.log)
+
+	return tgClient.Run(ctx, func(ctx context.Context) error {
+		worker := transcription.New(tgClient, semanticRepo, a.db.Pool, a.cfg.Transcription, a.log)
+		if err := worker.Run(ctx); err != nil {
+			return fmt.Errorf("transcription worker: %w", err)
+		}
+		return nil
+	})
 }
 
 // LoggerFromCfg returns a context-enriched slog logger.

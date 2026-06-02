@@ -22,16 +22,17 @@ func NewChatRepository(pool *pgxpool.Pool) domrepo.ChatRepository {
 
 func (r *chatRepo) Upsert(ctx context.Context, c *entity.Chat) error {
 	const q = `
-		INSERT INTO chats (id, type, title, username, updated_at)
-		VALUES ($1, $2, $3, $4, NOW())
+		INSERT INTO chats (id, type, title, username, access_hash, updated_at)
+		VALUES ($1, $2, $3, $4, $5, NOW())
 		ON CONFLICT (id) DO UPDATE SET
-			type       = EXCLUDED.type,
-			title      = EXCLUDED.title,
-			username   = EXCLUDED.username,
-			updated_at = NOW()`
+			type        = EXCLUDED.type,
+			title       = EXCLUDED.title,
+			username    = EXCLUDED.username,
+			access_hash = EXCLUDED.access_hash,
+			updated_at  = NOW()`
 
 	_, err := r.pool.Exec(ctx, q,
-		c.ID, string(c.Type), nullString(c.Title), nullString(c.Username),
+		c.ID, string(c.Type), nullString(c.Title), nullString(c.Username), c.AccessHash,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert chat %d: %w", c.ID, err)
@@ -57,13 +58,13 @@ func (r *chatRepo) UpdateRelevance(ctx context.Context, chatID int64, score floa
 
 func (r *chatRepo) GetByID(ctx context.Context, id int64) (*entity.Chat, error) {
 	const q = `
-		SELECT id, type, COALESCE(title,''), COALESCE(username,''), created_at, updated_at
+		SELECT id, type, COALESCE(title,''), COALESCE(username,''), access_hash, created_at, updated_at
 		FROM chats WHERE id = $1`
 
 	c := &entity.Chat{}
 	var chatType string
 	err := r.pool.QueryRow(ctx, q, id).Scan(
-		&c.ID, &chatType, &c.Title, &c.Username, &c.CreatedAt, &c.UpdatedAt,
+		&c.ID, &chatType, &c.Title, &c.Username, &c.AccessHash, &c.CreatedAt, &c.UpdatedAt,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -77,7 +78,7 @@ func (r *chatRepo) GetByID(ctx context.Context, id int64) (*entity.Chat, error) 
 
 func (r *chatRepo) ListAll(ctx context.Context) ([]*entity.Chat, error) {
 	const q = `
-		SELECT id, type, COALESCE(title,''), COALESCE(username,''), created_at, updated_at
+		SELECT id, type, COALESCE(title,''), COALESCE(username,''), access_hash, created_at, updated_at
 		FROM chats ORDER BY updated_at DESC`
 
 	rows, err := r.pool.Query(ctx, q)
@@ -90,7 +91,7 @@ func (r *chatRepo) ListAll(ctx context.Context) ([]*entity.Chat, error) {
 	for rows.Next() {
 		c := &entity.Chat{}
 		var chatType string
-		if err := rows.Scan(&c.ID, &chatType, &c.Title, &c.Username, &c.CreatedAt, &c.UpdatedAt); err != nil {
+		if err := rows.Scan(&c.ID, &chatType, &c.Title, &c.Username, &c.AccessHash, &c.CreatedAt, &c.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan chat: %w", err)
 		}
 		c.Type = entity.ChatType(chatType)

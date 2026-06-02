@@ -676,10 +676,12 @@ func (r *retrievalRepo) ChatInspect(ctx context.Context, chatID int64) (*retriev
 	const mainQ = `
 		SELECT
 			c.id, c.title, c.personality_surface, c.relevance_score,
-			COUNT(m.id) AS total,
-			COUNT(*) FILTER (WHERE m.is_outgoing) AS outgoing,
-			COUNT(*) FILTER (WHERE m.in_memory_window) AS in_window,
-			COUNT(DISTINCT em.episode_id) AS episodes
+			COUNT(m.id)                                                  AS total,
+			COUNT(*) FILTER (WHERE m.is_outgoing)                        AS outgoing,
+			COUNT(*) FILTER (WHERE m.in_memory_window)                   AS in_window,
+			COUNT(*) FILTER (WHERE m.is_outgoing AND m.in_memory_window) AS outgoing_in_window,
+			COUNT(*) FILTER (WHERE NOT m.is_outgoing AND m.in_memory_window) AS incoming_in_window,
+			COUNT(DISTINCT em.episode_id)                                AS episodes
 		FROM chats c
 		LEFT JOIN messages m ON m.chat_id = c.id AND NOT m.is_deleted
 		LEFT JOIN episode_messages em ON em.message_id = m.id
@@ -691,11 +693,40 @@ func (r *retrievalRepo) ChatInspect(ctx context.Context, chatID int64) (*retriev
 	row := r.pool.QueryRow(ctx, mainQ, chatID)
 	if err := row.Scan(
 		&rep.ChatID, &rep.Title, &surface, &rep.Score,
-		&rep.Total, &rep.Outgoing, &rep.InWindow, &rep.EpisodeCount,
+		&rep.Total, &rep.Outgoing, &rep.InWindow,
+		&rep.OutgoingInWindow, &rep.IncomingInWindow,
+		&rep.EpisodeCount,
 	); err != nil {
 		return nil, fmt.Errorf("chat inspect %d: %w", chatID, err)
 	}
 	rep.Surface = entity.PersonalitySurface(surface)
+
+	// Count step-3 reply targets that fall outside the row-proximity windows.
+	// These are non-outgoing in-window messages whose telegram_id matches reply_to_id
+	// of an outgoing message, but are NOT within ±WINDOW rows of any anchor by row number.
+	// We approximate using the configurable default (10/10); exact values would require
+	// passing window sizes. Non-zero count signals isolated reply-target inclusions.
+	isolatedRow := r.pool.QueryRow(ctx, `
+		WITH ordered AS (
+			SELECT id, is_outgoing, in_memory_window,
+			       ROW_NUMBER() OVER (ORDER BY sent_at ASC, telegram_id ASC) AS rn
+			FROM messages
+			WHERE chat_id = $1 AND NOT is_deleted
+		),
+		anchor_rns AS (
+			SELECT rn FROM ordered WHERE is_outgoing
+		)
+		SELECT COUNT(*)
+		FROM ordered o
+		WHERE o.in_memory_window = TRUE
+		  AND NOT o.is_outgoing
+		  AND NOT EXISTS (
+		      SELECT 1 FROM anchor_rns ar
+		      WHERE o.rn BETWEEN ar.rn - 10 AND ar.rn + 10
+		  )`, chatID)
+	if err := isolatedRow.Scan(&rep.IsolatedInWindow); err != nil {
+		return nil, fmt.Errorf("isolated in-window count %d: %w", chatID, err)
+	}
 
 	// Episode size distribution (min/avg/max).
 	epStatsRow := r.pool.QueryRow(ctx, `
@@ -733,26 +764,287 @@ func (r *retrievalRepo) ChatInspect(ctx context.Context, chatID int64) (*retriev
 	return &rep, nil
 }
 
+// ─── MediaInspect ─────────────────────────────────────────────────────────────
+
+func (r *retrievalRepo) MediaInspect(ctx context.Context) (*retrieval.MediaInspectReport, error) {
+	rep := &retrieval.MediaInspectReport{}
+	var err error
+
+	// 1. Global kind stats.
+	kindRows, err := r.pool.Query(ctx, `
+		SELECT
+			CASE WHEN media_kind = '' THEN 'text' ELSE media_kind END AS kind,
+			COUNT(*)                                     AS total,
+			COUNT(*) FILTER (WHERE in_memory_window)     AS in_window,
+			COUNT(*) FILTER (WHERE is_outgoing)          AS outgoing
+		FROM messages
+		WHERE NOT is_deleted
+		GROUP BY kind
+		ORDER BY total DESC`)
+	if err != nil {
+		return nil, fmt.Errorf("media kind stats: %w", err)
+	}
+	defer kindRows.Close()
+	for kindRows.Next() {
+		var s retrieval.MediaKindStat
+		if err := kindRows.Scan(&s.Kind, &s.Total, &s.InWindow, &s.Outgoing); err != nil {
+			return nil, fmt.Errorf("scan kind stat: %w", err)
+		}
+		rep.KindStats = append(rep.KindStats, s)
+	}
+	if err := kindRows.Err(); err != nil {
+		return nil, err
+	}
+
+	// 2. Voice detail.
+	if rep.Voice, err = r.fetchMediaKindDetail(ctx, "voice"); err != nil {
+		return nil, err
+	}
+
+	// 3. Round detail.
+	if rep.Round, err = r.fetchMediaKindDetail(ctx, "round"); err != nil {
+		return nil, err
+	}
+
+	// 4. Sticker detail.
+	if rep.Sticker, err = r.fetchStickerDetail(ctx); err != nil {
+		return nil, err
+	}
+
+	// 5. Photo detail.
+	if rep.Photo, err = r.fetchPhotoDetail(ctx); err != nil {
+		return nil, err
+	}
+
+	return rep, nil
+}
+
+// fetchMediaKindDetail fetches totals + top-5 chats (all / interpersonal / social)
+// for a given media_kind value.
+func (r *retrievalRepo) fetchMediaKindDetail(ctx context.Context, kind string) (retrieval.MediaKindDetail, error) {
+	var d retrieval.MediaKindDetail
+
+	totRow := r.pool.QueryRow(ctx, `
+		SELECT COUNT(*), COUNT(*) FILTER (WHERE in_memory_window), COUNT(*) FILTER (WHERE is_outgoing)
+		FROM messages WHERE media_kind = $1 AND NOT is_deleted`, kind)
+	if err := totRow.Scan(&d.Total, &d.InWindow, &d.Outgoing); err != nil {
+		return d, fmt.Errorf("media kind %s totals: %w", kind, err)
+	}
+
+	var err error
+	if d.TopChats, err = r.fetchMediaTopChats(ctx, kind, "", 5); err != nil {
+		return d, err
+	}
+	if d.TopInterpersonal, err = r.fetchMediaTopChats(ctx, kind, "interpersonal", 5); err != nil {
+		return d, err
+	}
+	if d.TopSocial, err = r.fetchMediaTopChats(ctx, kind, "social", 5); err != nil {
+		return d, err
+	}
+	return d, nil
+}
+
+// fetchMediaTopChats returns the top-N chats by message count for a given media_kind,
+// optionally filtered to one personality surface (empty string = all surfaces).
+func (r *retrievalRepo) fetchMediaTopChats(ctx context.Context, kind, surface string, limit int) ([]retrieval.MediaChatEntry, error) {
+	surfaceClause := ""
+	args := []any{kind}
+	if surface != "" {
+		surfaceClause = "AND c.personality_surface = $2"
+		args = append(args, surface)
+	}
+	args = append(args, limit)
+	limitParam := len(args)
+
+	query := fmt.Sprintf(`
+		SELECT c.id, c.title, c.personality_surface,
+		       COUNT(*)                                 AS total,
+		       COUNT(*) FILTER (WHERE m.in_memory_window) AS in_window,
+		       COUNT(*) FILTER (WHERE m.is_outgoing)    AS outgoing
+		FROM messages m
+		JOIN chats c ON c.id = m.chat_id
+		WHERE m.media_kind = $1 AND NOT m.is_deleted %s
+		GROUP BY c.id, c.title, c.personality_surface
+		ORDER BY total DESC
+		LIMIT $%d`, surfaceClause, limitParam)
+
+	rows, err := r.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("media top chats kind=%s surface=%s: %w", kind, surface, err)
+	}
+	defer rows.Close()
+
+	var entries []retrieval.MediaChatEntry
+	for rows.Next() {
+		var e retrieval.MediaChatEntry
+		var surf string
+		if err := rows.Scan(&e.ChatID, &e.Title, &surf, &e.Total, &e.InWindow, &e.Outgoing); err != nil {
+			return nil, fmt.Errorf("scan media chat entry: %w", err)
+		}
+		e.Surface = entity.PersonalitySurface(surf)
+		entries = append(entries, e)
+	}
+	return entries, rows.Err()
+}
+
+func (r *retrievalRepo) fetchStickerDetail(ctx context.Context) (retrieval.StickerDetail, error) {
+	var d retrieval.StickerDetail
+
+	totRow := r.pool.QueryRow(ctx, `
+		SELECT COUNT(*), COUNT(*) FILTER (WHERE in_memory_window), COUNT(*) FILTER (WHERE is_outgoing)
+		FROM messages WHERE media_kind = 'sticker' AND NOT is_deleted`)
+	if err := totRow.Scan(&d.Total, &d.InWindow, &d.Outgoing); err != nil {
+		return d, fmt.Errorf("sticker totals: %w", err)
+	}
+
+	// Top 10 emoticons. entity.StickerInfo marshals without json tags → key "Emoticon".
+	emoRows, err := r.pool.Query(ctx, `
+		SELECT sticker_meta->>'Emoticon' AS emoticon, COUNT(*) AS cnt
+		FROM messages
+		WHERE media_kind = 'sticker' AND NOT is_deleted
+		  AND sticker_meta IS NOT NULL
+		  AND sticker_meta->>'Emoticon' != ''
+		  AND sticker_meta->>'Emoticon' IS NOT NULL
+		GROUP BY emoticon
+		ORDER BY cnt DESC
+		LIMIT 10`)
+	if err != nil {
+		return d, fmt.Errorf("sticker emoticons: %w", err)
+	}
+	defer emoRows.Close()
+	for emoRows.Next() {
+		var e retrieval.StickerEmoticonEntry
+		if err := emoRows.Scan(&e.Emoticon, &e.Count); err != nil {
+			return d, fmt.Errorf("scan emoticon: %w", err)
+		}
+		d.TopEmoticons = append(d.TopEmoticons, e)
+	}
+	if err := emoRows.Err(); err != nil {
+		return d, err
+	}
+
+	if d.TopChats, err = r.fetchMediaTopChats(ctx, "sticker", "", 5); err != nil {
+		return d, err
+	}
+
+	// Surface distribution.
+	surfRows, err := r.pool.Query(ctx, `
+		SELECT c.personality_surface,
+		       COUNT(*) AS total,
+		       COUNT(*) FILTER (WHERE m.in_memory_window) AS in_window
+		FROM messages m
+		JOIN chats c ON c.id = m.chat_id
+		WHERE m.media_kind = 'sticker' AND NOT m.is_deleted
+		  AND c.personality_surface != ''
+		GROUP BY c.personality_surface
+		ORDER BY total DESC`)
+	if err != nil {
+		return d, fmt.Errorf("sticker by surface: %w", err)
+	}
+	defer surfRows.Close()
+	for surfRows.Next() {
+		var e retrieval.MediaSurfaceEntry
+		var surf string
+		if err := surfRows.Scan(&surf, &e.Total, &e.InWindow); err != nil {
+			return d, fmt.Errorf("scan sticker surface: %w", err)
+		}
+		e.Surface = entity.PersonalitySurface(surf)
+		d.BySurface = append(d.BySurface, e)
+	}
+	return d, surfRows.Err()
+}
+
+func (r *retrievalRepo) fetchPhotoDetail(ctx context.Context) (retrieval.PhotoDetail, error) {
+	var d retrieval.PhotoDetail
+
+	totRow := r.pool.QueryRow(ctx, `
+		SELECT COUNT(*), COUNT(*) FILTER (WHERE in_memory_window), COUNT(*) FILTER (WHERE is_outgoing)
+		FROM messages WHERE media_kind = 'photo' AND NOT is_deleted`)
+	if err := totRow.Scan(&d.Total, &d.InWindow, &d.Outgoing); err != nil {
+		return d, fmt.Errorf("photo totals: %w", err)
+	}
+
+	var err error
+	if d.TopChats, err = r.fetchMediaTopChats(ctx, "photo", "", 5); err != nil {
+		return d, err
+	}
+
+	surfRows, err := r.pool.Query(ctx, `
+		SELECT c.personality_surface,
+		       COUNT(*) AS total,
+		       COUNT(*) FILTER (WHERE m.in_memory_window) AS in_window
+		FROM messages m
+		JOIN chats c ON c.id = m.chat_id
+		WHERE m.media_kind = 'photo' AND NOT m.is_deleted
+		  AND c.personality_surface != ''
+		GROUP BY c.personality_surface
+		ORDER BY total DESC`)
+	if err != nil {
+		return d, fmt.Errorf("photo by surface: %w", err)
+	}
+	defer surfRows.Close()
+	for surfRows.Next() {
+		var e retrieval.MediaSurfaceEntry
+		var surf string
+		if err := surfRows.Scan(&surf, &e.Total, &e.InWindow); err != nil {
+			return d, fmt.Errorf("scan photo surface: %w", err)
+		}
+		e.Surface = entity.PersonalitySurface(surf)
+		d.BySurface = append(d.BySurface, e)
+	}
+	return d, surfRows.Err()
+}
+
 // ─── VoiceStats ───────────────────────────────────────────────────────────────
 
 func (r *retrievalRepo) VoiceStats(ctx context.Context) (*retrieval.VoiceStats, error) {
 	stats := &retrieval.VoiceStats{}
 
-	// Global totals.
+	// Global totals including in_memory_window count.
 	totRow := r.pool.QueryRow(ctx, `
-		SELECT COUNT(*), COUNT(*) FILTER (WHERE is_outgoing)
+		SELECT
+			COUNT(*),
+			COUNT(*) FILTER (WHERE is_outgoing),
+			COUNT(*) FILTER (WHERE in_memory_window)
 		FROM messages
 		WHERE media_kind = 'voice' AND NOT is_deleted`)
-	if err := totRow.Scan(&stats.TotalVoice, &stats.OutgoingVoice); err != nil {
+	if err := totRow.Scan(&stats.TotalVoice, &stats.OutgoingVoice, &stats.VoiceInWindow); err != nil {
 		return nil, fmt.Errorf("voice global totals: %w", err)
+	}
+
+	// Voice in_window breakdown by personality surface.
+	surfRows, err := r.pool.Query(ctx, `
+		SELECT c.personality_surface, COUNT(*) FILTER (WHERE m.in_memory_window)
+		FROM messages m
+		JOIN chats c ON c.id = m.chat_id
+		WHERE m.media_kind = 'voice' AND NOT m.is_deleted
+		  AND c.personality_surface != ''
+		GROUP BY c.personality_surface
+		ORDER BY c.personality_surface`)
+	if err != nil {
+		return nil, fmt.Errorf("voice by surface: %w", err)
+	}
+	defer surfRows.Close()
+	for surfRows.Next() {
+		var e retrieval.VoiceSurfaceEntry
+		var surface string
+		if err := surfRows.Scan(&surface, &e.VoiceInWindow); err != nil {
+			return nil, fmt.Errorf("scan voice surface entry: %w", err)
+		}
+		e.Surface = entity.PersonalitySurface(surface)
+		stats.BySurface = append(stats.BySurface, e)
+	}
+	if err := surfRows.Err(); err != nil {
+		return nil, err
 	}
 
 	// Top 20 chats by voice message count.
 	rows, err := r.pool.Query(ctx, `
 		SELECT
 			c.id, c.title, c.personality_surface, c.relevance_score,
-			COUNT(m.id)                              AS voice_count,
-			COUNT(*) FILTER (WHERE m.is_outgoing)    AS outgoing_count
+			COUNT(m.id)                                    AS voice_count,
+			COUNT(*) FILTER (WHERE m.is_outgoing)          AS outgoing_count,
+			COUNT(*) FILTER (WHERE m.in_memory_window)     AS in_window_count
 		FROM chats c
 		JOIN messages m ON m.chat_id = c.id
 			AND NOT m.is_deleted
@@ -769,7 +1061,7 @@ func (r *retrievalRepo) VoiceStats(ctx context.Context) (*retrieval.VoiceStats, 
 		var surface string
 		if err := rows.Scan(
 			&e.ChatID, &e.Title, &surface, &e.Score,
-			&e.VoiceCount, &e.OutgoingCount,
+			&e.VoiceCount, &e.OutgoingCount, &e.InWindowCount,
 		); err != nil {
 			return nil, fmt.Errorf("scan voice chat entry: %w", err)
 		}

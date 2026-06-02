@@ -147,6 +147,20 @@ func (r *Runner) InspectChat(ctx context.Context, args []string) error {
 	fmt.Printf("  Outgoing (user):    %d  (%.1f%%)\n", rep.Outgoing, outPct)
 	fmt.Printf("  In memory window:   %d  (%.1f%%)\n", rep.InWindow, winPct)
 
+	// ── Window composition ────────────────────────────────────────────────────
+	fmt.Printf("\n%s\n", sectionLine("Window Composition"))
+	fmt.Printf("  Anchors in window:  %d  (outgoing messages that define the window)\n", rep.OutgoingInWindow)
+	fmt.Printf("  Context in window:  %d  (surrounding foreign messages)\n", rep.IncomingInWindow)
+	if rep.IsolatedInWindow > 0 {
+		fmt.Printf("  Isolated replies:   %d  [!] reply targets outside row-proximity range\n", rep.IsolatedInWindow)
+	} else {
+		fmt.Printf("  Isolated replies:   0  (all in-window messages are near an anchor)\n")
+	}
+	if rep.OutgoingInWindow == 0 && rep.InWindow > 0 {
+		fmt.Printf("\n  [!] WARNING: %d in-window messages but 0 user anchors — should not happen.\n", rep.InWindow)
+		fmt.Printf("      Check that ComputeParticipationWindows ran for this chat.\n")
+	}
+
 	// ── Episode section ───────────────────────────────────────────────────────
 	fmt.Printf("\n%s\n", sectionLine("Episode Quality"))
 	if rep.EpisodeCount == 0 {

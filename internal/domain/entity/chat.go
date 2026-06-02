@@ -34,14 +34,15 @@ const (
 )
 
 type Chat struct {
-	ID        int64
-	Type      ChatType
-	Title     string
-	Username  string
+	ID         int64
+	Type       ChatType
+	Title      string
+	Username   string
+	AccessHash int64 // required for InputPeerUser / InputPeerChannel reconstruction after restart
 
 	// Relevance metadata — scored during sync, persisted for inspectability.
-	RelevanceScore    float32
-	RelevanceReason   string
+	RelevanceScore     float32
+	RelevanceReason    string
 	PersonalitySurface PersonalitySurface
 
 	CreatedAt time.Time

@@ -97,6 +97,77 @@ type WindowAnchor struct {
 	Messages []WindowMessage
 }
 
+// ─── Media inspect types ─────────────────────────────────────────────────────
+
+// MediaKindStat is one row in the global media-kind overview table.
+type MediaKindStat struct {
+	Kind     string // "text" | "voice" | "video" | "sticker" | "photo" | "round" | ...
+	Total    int
+	InWindow int
+	Outgoing int
+}
+
+// MediaChatEntry is one chat row in a per-kind top-chats list.
+type MediaChatEntry struct {
+	ChatID   int64
+	Title    string
+	Surface  entity.PersonalitySurface
+	Total    int
+	InWindow int
+	Outgoing int
+}
+
+// MediaSurfaceEntry is the count for one personality surface in a per-kind breakdown.
+type MediaSurfaceEntry struct {
+	Surface  entity.PersonalitySurface
+	Total    int
+	InWindow int
+}
+
+// StickerEmoticonEntry is a top-N emoticon row.
+type StickerEmoticonEntry struct {
+	Emoticon string
+	Count    int
+}
+
+// MediaKindDetail is the full breakdown for voice or round media.
+type MediaKindDetail struct {
+	Total            int
+	InWindow         int
+	Outgoing         int
+	TopChats         []MediaChatEntry // top 5 overall
+	TopInterpersonal []MediaChatEntry // top 5 interpersonal surface
+	TopSocial        []MediaChatEntry // top 5 social surface
+}
+
+// StickerDetail is the breakdown specific to sticker media.
+type StickerDetail struct {
+	Total        int
+	InWindow     int
+	Outgoing     int
+	TopEmoticons []StickerEmoticonEntry
+	TopChats     []MediaChatEntry
+	BySurface    []MediaSurfaceEntry
+}
+
+// PhotoDetail is the breakdown specific to photo media.
+type PhotoDetail struct {
+	Total     int
+	InWindow  int
+	Outgoing  int
+	TopChats  []MediaChatEntry
+	BySurface []MediaSurfaceEntry
+}
+
+// MediaInspectReport is the full media audit snapshot.
+type MediaInspectReport struct {
+	KindStats []MediaKindStat
+	Voice     MediaKindDetail
+	Round     MediaKindDetail
+	Sticker   StickerDetail
+	Photo     PhotoDetail
+}
+
 // VoiceChatEntry is one row in the per-chat voice message breakdown.
 type VoiceChatEntry struct {
 	ChatID        int64
@@ -105,12 +176,21 @@ type VoiceChatEntry struct {
 	Score         float32
 	VoiceCount    int
 	OutgoingCount int
+	InWindowCount int // voice messages with in_memory_window=TRUE
+}
+
+// VoiceSurfaceEntry is the voice in_window count for one personality surface.
+type VoiceSurfaceEntry struct {
+	Surface      entity.PersonalitySurface
+	VoiceInWindow int
 }
 
 // VoiceStats is a global summary of voice messages across the database.
 type VoiceStats struct {
 	TotalVoice    int
 	OutgoingVoice int
+	VoiceInWindow int              // voice with in_memory_window=TRUE
+	BySurface     []VoiceSurfaceEntry
 	TopChats      []VoiceChatEntry // up to 20 chats by voice count, desc
 }
 
@@ -163,6 +243,13 @@ type ChatInspectReport struct {
 	Total        int
 	Outgoing     int
 	InWindow     int
+	// Window composition breakdown.
+	OutgoingInWindow int // user messages inside the window
+	IncomingInWindow int // foreign messages inside the window
+	// IsolatedInWindow: in-window non-outgoing messages that are reply targets
+	// of outgoing messages but are NOT within ±window rows of any anchor.
+	// Non-zero indicates step-3 reply targets outside the row-proximity windows.
+	IsolatedInWindow int
 	EpisodeCount    int
 	EpisodeMin      int
 	EpisodeAvg      float64

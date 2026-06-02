@@ -8,13 +8,15 @@ import (
 )
 
 type Config struct {
-	App       AppConfig
-	Postgres  PostgresConfig
-	Telegram  TelegramConfig
-	OpenAI    OpenAIConfig
-	Embedding EmbeddingConfig
-	Window    WindowConfig
-	Sync      SyncConfig
+	App           AppConfig
+	Postgres      PostgresConfig
+	Telegram      TelegramConfig
+	OpenAI        OpenAIConfig
+	Embedding     EmbeddingConfig
+	Window        WindowConfig
+	Sync          SyncConfig
+	Transcription TranscriptionConfig
+	Utterance     UtteranceConfig
 }
 
 // SyncConfig controls Telegram history pagination rate limiting and FLOOD_WAIT handling.
@@ -34,6 +36,32 @@ type SyncConfig struct {
 	// FloodBackoffMultiplier scales the sleep duration on each successive retry.
 	// A value of 1.5 means each retry waits 1.5× longer than the previous one.
 	FloodBackoffMultiplier float64 `env:"SYNC_FLOOD_BACKOFF_MULT" envDefault:"1.5"`
+}
+
+// TranscriptionConfig controls the voice transcription backfill worker.
+type TranscriptionConfig struct {
+	// BatchSize is the number of voice messages fetched per worker iteration.
+	BatchSize int `env:"TRANSCRIPTION_BATCH_SIZE" envDefault:"10"`
+
+	// RequestDelay is the pause inserted between consecutive transcribeAudio calls
+	// to avoid hitting undocumented rate limits.
+	RequestDelay time.Duration `env:"TRANSCRIPTION_REQUEST_DELAY" envDefault:"3s"`
+
+	// PollDelay is the wait time between the first and subsequent calls when
+	// Telegram returns Pending=true (transcription in progress).
+	PollDelay time.Duration `env:"TRANSCRIPTION_POLL_DELAY" envDefault:"30s"`
+
+	// PollAttempts is the maximum number of MessagesTranscribeAudio calls per message.
+	// If all attempts return Pending=true, the message is skipped without marking
+	// transcribed_at — it will be retried on the next worker run.
+	PollAttempts int `env:"TRANSCRIPTION_POLL_ATTEMPTS" envDefault:"2"`
+}
+
+// UtteranceConfig controls how consecutive messages are grouped into semantic utterances.
+type UtteranceConfig struct {
+	// GapSeconds is the maximum silence between consecutive messages from the same author
+	// before a new utterance begins. Messages within this gap are treated as one thought.
+	GapSeconds int `env:"UTTERANCE_GAP_SECONDS" envDefault:"120"`
 }
 
 // WindowConfig controls participation-window size for group/channel dialogs.
@@ -101,8 +129,9 @@ func Load() (*Config, error) {
 // CLIConfig is a minimal config for read-only CLI inspection commands.
 // It does not require Telegram credentials.
 type CLIConfig struct {
-	App      AppConfig
-	Postgres PostgresConfig
+	App       AppConfig
+	Postgres  PostgresConfig
+	Utterance UtteranceConfig
 }
 
 // LoadCLI parses only the application and database configuration.

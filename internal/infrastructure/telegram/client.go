@@ -18,6 +18,7 @@ import (
 
 	"github.com/digital-personality/internal/application/port"
 	"github.com/digital-personality/internal/config"
+	"github.com/digital-personality/internal/domain/entity"
 )
 
 const (
@@ -25,12 +26,13 @@ const (
 	dialogsPageLimit = 100
 )
 
-// Client wraps gotd/td and implements port.TelegramGateway.
+// Client wraps gotd/td and implements port.TelegramGateway and port.VoiceTranscriber.
 // It is safe to call Dialogs/History/Self concurrently once Run has invoked its handler.
 type Client struct {
-	cfg     config.TelegramConfig
-	syncCfg config.SyncConfig
-	log     *slog.Logger
+	cfg            config.TelegramConfig
+	syncCfg        config.SyncConfig
+	transcriptionCfg config.TranscriptionConfig
+	log            *slog.Logger
 
 	// td and api are populated inside Run() before fn is called.
 	td  atomic.Pointer[telegram.Client]
@@ -41,8 +43,8 @@ type Client struct {
 }
 
 // New constructs a Client. Call Run to activate the MTProto connection.
-func New(cfg config.TelegramConfig, syncCfg config.SyncConfig, log *slog.Logger) *Client {
-	return &Client{cfg: cfg, syncCfg: syncCfg, log: log}
+func New(cfg config.TelegramConfig, syncCfg config.SyncConfig, transcriptionCfg config.TranscriptionConfig, log *slog.Logger) *Client {
+	return &Client{cfg: cfg, syncCfg: syncCfg, transcriptionCfg: transcriptionCfg, log: log}
 }
 
 // Run connects to Telegram via MTProto, authenticates (or loads saved session),
@@ -251,6 +253,118 @@ func (c *Client) fetchHistoryWithRetry(
 
 	// unreachable
 	return nil, fmt.Errorf("MessagesGetHistory chat=%d offset=%d: exhausted %d retries", chatID, offset, maxRetries)
+}
+
+// TranscribeVoice requests Telegram Premium STT for the given voice message.
+// Poll loop: calls MessagesTranscribeAudio up to PollAttempts times, sleeping
+// PollDelay between attempts when Telegram returns Pending=true.
+// FLOOD_WAIT is handled transparently inside doTranscribeWithFloodRetry.
+//
+// Errors are wrapped into port sentinels (ErrTranscriptionPending,
+// ErrTranscriptionPermanent, ErrPremiumRequired) — no tgerr types leak out.
+func (c *Client) TranscribeVoice(
+	ctx           context.Context,
+	chatType      entity.ChatType,
+	chatID        int64,
+	accessHash    int64,
+	telegramMsgID int,
+) (string, error) {
+	peer := buildInputPeer(chatType, chatID, accessHash)
+	req := &tg.MessagesTranscribeAudioRequest{Peer: peer, MsgID: telegramMsgID}
+
+	pollAttempts := c.transcriptionCfg.PollAttempts
+	if pollAttempts <= 0 {
+		pollAttempts = 2
+	}
+
+	for poll := 1; poll <= pollAttempts; poll++ {
+		resp, err := c.doTranscribeWithFloodRetry(ctx, req, chatID, telegramMsgID)
+		if err != nil {
+			return "", err
+		}
+		if !resp.Pending {
+			return resp.Text, nil
+		}
+		if poll == pollAttempts {
+			break
+		}
+		c.log.Info("transcription pending, will poll again",
+			"chat_id", chatID, "telegram_id", telegramMsgID,
+			"poll_attempt", poll, "poll_max", pollAttempts)
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(c.transcriptionCfg.PollDelay):
+		}
+	}
+
+	return "", port.ErrTranscriptionPending
+}
+
+// doTranscribeWithFloodRetry calls MessagesTranscribeAudio once, retrying only
+// on FLOOD_WAIT. All other errors are classified and returned immediately.
+func (c *Client) doTranscribeWithFloodRetry(
+	ctx           context.Context,
+	req           *tg.MessagesTranscribeAudioRequest,
+	chatID        int64,
+	telegramMsgID int,
+) (*tg.MessagesTranscribedAudio, error) {
+	maxRetries := c.syncCfg.FloodMaxRetries
+	if maxRetries <= 0 {
+		maxRetries = 3
+	}
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		resp, err := c.mustAPI().MessagesTranscribeAudio(ctx, req)
+		if err == nil {
+			return resp, nil
+		}
+		if d, ok := tgerr.AsFloodWait(err); ok {
+			if attempt == maxRetries {
+				return nil, fmt.Errorf("transcribe flood wait exhausted chat=%d msg=%d: %w",
+					chatID, telegramMsgID, err)
+			}
+			sleep := d + c.syncCfg.FloodJitter
+			c.log.Warn("transcribe flood wait",
+				"chat_id", chatID, "telegram_id", telegramMsgID,
+				"wait", sleep, "attempt", attempt)
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(sleep):
+			}
+			continue
+		}
+		return nil, c.classifyTranscribeError(err, chatID, telegramMsgID)
+	}
+	return nil, fmt.Errorf("transcribe exhausted retries chat=%d msg=%d", chatID, telegramMsgID)
+}
+
+// classifyTranscribeError wraps known permanent RPC errors into port sentinels.
+func (c *Client) classifyTranscribeError(err error, chatID int64, msgID int) error {
+	if tgerr.Is(err, "PREMIUM_ACCOUNT_REQUIRED") {
+		return fmt.Errorf("%w: %w", port.ErrPremiumRequired, err)
+	}
+	if tgerr.Is(err, "MSG_VOICE_MISSING", "TRANSCRIPTION_FAILED", "MSG_ID_INVALID", "PEER_ID_INVALID") {
+		return fmt.Errorf("%w: chat=%d msg=%d: %w", port.ErrTranscriptionPermanent, chatID, msgID, err)
+	}
+	return fmt.Errorf("transcribe chat=%d msg=%d: %w", chatID, msgID, err)
+}
+
+// buildInputPeer constructs the correct InputPeer from stored chat metadata.
+func buildInputPeer(chatType entity.ChatType, chatID, accessHash int64) tg.InputPeerClass {
+	switch chatType {
+	case entity.ChatTypeSavedMessages:
+		return &tg.InputPeerSelf{}
+	case entity.ChatTypePrivate:
+		return &tg.InputPeerUser{UserID: chatID, AccessHash: accessHash}
+	case entity.ChatTypeGroup:
+		return &tg.InputPeerChat{ChatID: chatID}
+	case entity.ChatTypeChannel, entity.ChatTypeSupergroup:
+		return &tg.InputPeerChannel{ChannelID: chatID, AccessHash: accessHash}
+	default:
+		return &tg.InputPeerEmpty{}
+	}
 }
 
 func (c *Client) buildHistoryPage(resp tg.MessagesMessagesClass) (*port.HistoryPage, error) {

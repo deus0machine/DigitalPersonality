@@ -135,6 +135,15 @@ func (s *Service) InspectChat(ctx context.Context, chatID int64) (*ChatInspectRe
 	return r, nil
 }
 
+// MediaInspect returns a comprehensive media audit across all message types.
+func (s *Service) MediaInspect(ctx context.Context) (*MediaInspectReport, error) {
+	r, err := s.repo.MediaInspect(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("media inspect: %w", err)
+	}
+	return r, nil
+}
+
 // VoiceStats returns the global voice message count and top-20 chats by voice volume.
 func (s *Service) VoiceStats(ctx context.Context) (*VoiceStats, error) {
 	v, err := s.repo.VoiceStats(ctx)

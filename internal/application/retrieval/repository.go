@@ -46,4 +46,7 @@ type Repository interface {
 
 	// VoiceStats returns the global voice message count and per-chat breakdown.
 	VoiceStats(ctx context.Context) (*VoiceStats, error)
+
+	// MediaInspect returns a comprehensive media audit across all message types.
+	MediaInspect(ctx context.Context) (*MediaInspectReport, error)
 }

@@ -119,6 +119,7 @@ func (e *Engine) RunBackfill(ctx context.Context) error {
 			if err := e.chatRepo.Upsert(ctx, &entity.Chat{
 				ID: s.dialog.ID, Type: s.dialog.Type,
 				Title: s.dialog.Title, Username: s.dialog.Username,
+				AccessHash: s.dialog.AccessHash,
 			}); err != nil {
 				e.log.Warn("upsert chat failed", "chat_id", s.dialog.ID, "error", err)
 			}

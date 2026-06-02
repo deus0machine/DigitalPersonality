@@ -13,9 +13,10 @@ import "time"
 // table so we can track that normalization already ran.
 type SemanticDocument struct {
 	MessageID      int64
-	NormalizedText string    // text processed for semantic search/embedding
-	Language       string    // 'ru' | 'en' | 'mixed' | '' (unknown)
-	TokenCount     int       // whitespace-token word count (for cost estimation)
-	SkipEmbedding  bool      // true = don't embed; personality-only message
+	NormalizedText string     // text processed for semantic search/embedding
+	Language       string     // 'ru' | 'en' | 'mixed' | '' (unknown)
+	TokenCount     int        // whitespace-token word count (for cost estimation)
+	SkipEmbedding  bool       // true = don't embed; personality-only message
 	CreatedAt      time.Time
+	TranscribedAt  *time.Time // nil = not yet attempted; non-nil = processed (voice transcription)
 }

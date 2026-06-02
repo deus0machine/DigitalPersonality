@@ -71,44 +71,128 @@
 
 ## Текущее
 
-Phase 4.10 завершена. Participation-centered memory windows полностью интегрированы.
-Следующий шаг: запустить sync на реальных данных, валидировать через `windows` CLI и SQL queries, затем Phase 5.
+Phase 4.11 завершена. Validation & Inspection CLI, media audit (`media-inspect`, `voice-stats`),
+distributed anchor sampling, episode quality stats в `inspect-chat`.
+
+Следующий шаг: Phase 5.1 — access_hash fix + Voice Transcription Pipeline.
 
 ---
 
-## Следующее (Phase 5 — Embedding Pipeline)
+## Phase 5.1 — Voice Transcription (Telegram Premium)
 
-**Цель**: векторный поиск поверх существующего FTS+trigram.
+**Цель**: конвертировать 948 in-window голосовых сообщений в семантическую память.
 
-Что нужно:
-- `message_embeddings` таблица (pgvector, dim=1536 или dim=3072)
-- Batch embedding worker: читает `ListPendingEmbedding`, вызывает OpenAI API
-- Retry + backoff, дедупликация
-- `EmbeddingRepository`: SaveEmbedding, ListPending, MarkDone
-- Расширить `retrieval.Repository`: `SearchByVector(ctx, vec []float32, q Query)`
-- Обновить `OPENAI_API_KEY` как required
+**Почему сейчас**: 55% voice retention rate, Telegram Premium доступен, нет зависимости от OpenAI.
+Спонтанная речь — высокоценный personality signal.
 
-**Инвариант**: embeddings — infrastructure, не business logic. Векторный поиск аддитивен к FTS, не заменяет.
+**Блокер (снимается за ~30 мин)**:
+`access_hash` не хранится → `InputPeer` нельзя построить после перезапуска.
+`port.DialogInfo.AccessHash` уже есть в sync engine — просто не пробрасывается в upsert.
+
+Фикс — 4 изменения:
+1. `migrations/000007`: `ALTER TABLE chats ADD COLUMN access_hash BIGINT NOT NULL DEFAULT 0`
+2. `entity.Chat.AccessHash int64`
+3. `ChatRepository.Upsert` → сохраняет `c.AccessHash`
+4. `sync/engine.go` → `AccessHash: s.dialog.AccessHash` при `chatRepo.Upsert`
+
+**Transcription Worker**:
+- Очередь: `media_kind='voice' AND in_memory_window=TRUE AND ms.transcribed_at IS NULL`
+- Вызов: `tg.MessagesTranscribeAudio{Peer, MsgID}`
+- Pending=true → polling-retry через 30 s (не update stream)
+- Результат: `ms.normalized_text = transcript`, `ms.skip_embedding = FALSE`, `ms.transcribed_at = NOW()`
+- Throttle: 1 req / 5 s → 948 сообщений ≈ 1.5 ч
+- Idempotent: `transcribed_at IS NULL` guard
+
+**Важно**: `messages.transcribeAudio` НЕ поддерживает round video (`MSG_VOICE_MISSING`).
+Round отложен в Phase 6 (требует Whisper + document metadata).
 
 ---
 
-## Следующее (Phase 6 — LLM Persona)
+## Phase 5.5 — Sticker Analytics + Emotional Vocabulary
 
-**Цель**: симуляция стиля общения через LLM + memory retrieval.
+**Цель**: извлечь personality signals из уже хранящихся sticker_meta без API вызовов.
 
-Что нужно:
-- PromptBuilder: собирает контекст из retrieved episodes + personality signals
-- PersonaService: stateless генератор, personality из памяти
-- HTTP API или CLI: интерфейс для запросов к персоне
+**Sticker emoticon aggregation** (данные уже в DB):
+- `sticker_meta->>'Emoticon'` → `personality_signals` типа `sticker_emoticon`
+- Aggregation: топ-N эмодзи по чатам, по времени суток, по контексту разговора
+- Effort: ~2 часа (чистый SQL)
 
-**Инвариант**: LLM не знает personality напрямую — только через retrieval.
+**Emotional vocabulary extraction**:
+- Sticker как замена слову → "я использую 😭 вместо 'мне грустно'"
+- Корреляция emoticon + preceding/following text → эмоциональный паттерн
+- PersonalityReport: section "Sticker Communication Style"
+
+**Sticker usage patterns**:
+- Частота sticker vs text reply (показывает стиль коммуникации)
+- Любимые паки по поверхностям (interpersonal vs social)
+- Временные паттерны (вечерние sticker vs дневные text)
 
 ---
 
-## Идеи на будущее
+## Phase 5.3 — Embedding Pipeline
 
-- Relationship graph: кто с кем, как часто, тональность
-- Emotional modeling: sentiment per conversation arc
-- Multimodal memory: voice messages, stickers как personality markers
-- Temporal drift: как менялся стиль со временем
-- Autonomous memory consolidation: периодическая перегенерация эпизодов
+После Phase 5.1: транскрипты автоматически входят в embedding queue (`skip_embedding=FALSE`).
+
+- `message_embeddings` таблица (pgvector, dim=1536)
+- Batch embedding worker: `ListPendingEmbedding` → OpenAI API
+- `SearchByVector` в retrieval
+- Embeddings — infrastructure. Аддитивны к FTS.
+
+---
+
+## Phase 6 — Round Video + Photo + LLM Persona
+
+**Round transcription**: document metadata migration + Whisper. 2107 in-window.
+
+**Photo captions**: `text` уже хранит caption → использовать напрямую (zero effort).
+
+**LLM Persona**:
+- PromptBuilder: контекст из retrieved episodes + personality signals
+- PersonaService: stateless, personality только через retrieval
+- HTTP API или CLI интерфейс
+
+---
+
+## Backlog — Media Pipeline
+
+### 🔜 Phase 5
+
+| Фича | Ценность | Сложность | Зависимость |
+|---|---|---|---|
+| access_hash storage (migration 000007) | Blocker | S | — |
+| Voice transcription worker | ⭐⭐⭐⭐⭐ | M | access_hash, Premium |
+| Sticker emoticon aggregation | ⭐⭐⭐ | S | — (данные уже в DB) |
+
+### 📋 Phase 6
+
+| Фича | Ценность | Сложность | Описание |
+|---|---|---|---|
+| Round video transcription | ⭐⭐⭐⭐ | XL | document metadata + Whisper |
+| Document text extraction | ⭐⭐⭐ | M | PDF/DOCX → text → embedding |
+| Photo caption retrieval | ⭐⭐ | XS | text уже хранится |
+| Relationship graph | ⭐⭐⭐⭐ | L | Кто с кем, как часто, тональность |
+| Emotional modeling | ⭐⭐⭐ | L | Sentiment per episode arc |
+
+### 🔭 Phase 7+
+
+| Фича | Ценность | Сложность | Описание |
+|---|---|---|---|
+| Photo vision analysis | ⭐⭐ | XL | GPT-4V / Claude Vision, ~4438 in-window |
+| Video vision/audio analysis | ⭐ | XXL | 12805 in-window, mostly consumed content |
+| Multimodal embeddings | ⭐⭐⭐⭐ | XXL | CLIP / unified vector space |
+| Temporal drift analysis | ⭐⭐⭐ | M | Как менялся стиль со временем |
+| Autonomous memory consolidation | ⭐⭐⭐ | L | Периодическая перегенерация эпизодов |
+
+---
+
+## ROI матрица (media pipeline)
+
+| Тип | In-window | Effort | Value | Phase |
+|---|---|---|---|---|
+| Voice transcription | 948 | M | ⭐⭐⭐⭐⭐ | **5.1** |
+| Sticker emoticons | 8583 | S | ⭐⭐⭐ | **5.2** |
+| Round transcription | 2107 | XL | ⭐⭐⭐⭐ | 6 |
+| Photo captions | 4438 | XS | ⭐⭐ | 6 |
+| Document text | 1224 | M | ⭐⭐⭐ | 6 |
+| Photo vision | 4438 | XL | ⭐⭐ | 7+ |
+| Video analysis | 12805 | XXL | ⭐ | 7+ |

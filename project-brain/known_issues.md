@@ -160,6 +160,31 @@
 
 ---
 
+## Voice Transcription Blockers
+
+### KI-022 — access_hash not stored (blocks transcription for private/channel/supergroup)
+**Проблема**: `chats.access_hash` не хранится. После перезапуска приложения невозможно построить
+`InputPeerUser` (private чаты) или `InputPeerChannel` (channels, supergroups).
+Только `ChatTypeGroup` работает без access_hash (`InputPeerChat{ChatID}`).
+**Влияние**: `messages.transcribeAudio` недоступен для interpersonal чатов — там сосредоточена основная часть ценных голосовых сообщений.
+**Решение (Phase 5.1)**:
+- `migrations/000007`: `ALTER TABLE chats ADD COLUMN access_hash BIGINT NOT NULL DEFAULT 0`
+- `entity.Chat.AccessHash int64`
+- `ChatRepository.Upsert` → сохраняет access_hash
+- `sync/engine.go` → `AccessHash: s.dialog.AccessHash` при chatRepo.Upsert
+  (`port.DialogInfo.AccessHash` уже доступен — просто не пробрасывается)
+
+### KI-023 — transcribed_at отсутствует в message_semantic
+**Проблема**: нет колонки для отслеживания статуса транскрипции. Без неё worker не может
+различить "не транскрибировано" и "транскрибировано с пустым результатом".
+**Влияние**: нет идемпотентного checkpoint для transcription worker.
+**Решение (Phase 5.1)**:
+- `migrations/000007`: `ALTER TABLE message_semantic ADD COLUMN transcribed_at TIMESTAMPTZ`
+- `entity.SemanticDocument.TranscribedAt *time.Time`
+- `SemanticRepository.MarkTranscribed(ctx, messageID, transcript, tokenCount) error`
+
+---
+
 ## Architectural Concerns
 
 ### KI-015 — app.go вырастает
