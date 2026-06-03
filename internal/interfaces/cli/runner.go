@@ -18,7 +18,8 @@ type Runner struct {
 	svc           *retrieval.Service
 	utteranceRepo utterance.Repository
 	utteranceCfg  config.UtteranceConfig
-	utSvc         *utterance.RetrievalService
+	rerankCfg     config.RerankConfig
+	utSvc         *utterance.RetrievalService // uses BM25+Rerank by default
 	db            *postgres.DB
 }
 
@@ -31,12 +32,18 @@ func New(ctx context.Context, cfg *config.CLIConfig, log *slog.Logger) (*Runner,
 	repo := pgrepo.NewRetrievalRepository(db.Pool)
 	svc := retrieval.NewService(repo)
 	utRepo := pgrepo.NewUtteranceRepository(db.Pool)
-	scorer := utterance.NewBM25Scorer()
-	utSvc := utterance.NewRetrievalService(utRepo, scorer, cfg.Utterance)
+
+	// retrieve / retrieve-context use BM25+Rerank by default.
+	// retrieve-audit creates its own BM25-only service for baseline comparison.
+	bm25 := utterance.NewBM25Scorer()
+	rerank := utterance.NewRerankScorer(bm25, cfg.Rerank.K, cfg.Rerank.Cap)
+	utSvc := utterance.NewRetrievalService(utRepo, rerank, cfg.Utterance)
+
 	return &Runner{
 		svc:           svc,
 		utteranceRepo: utRepo,
 		utteranceCfg:  cfg.Utterance,
+		rerankCfg:     cfg.Rerank,
 		utSvc:         utSvc,
 		db:            db,
 	}, nil

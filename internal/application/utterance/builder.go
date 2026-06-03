@@ -28,6 +28,7 @@ type MessageInput struct {
 // Utterance is one complete communicative turn by a single author.
 // May span multiple raw messages when the author sends in rapid succession.
 type Utterance struct {
+	Position     int    // stable index in the Build() result slice; set post-construction
 	AuthorID     int64
 	ChatID       int64
 	ChatTitle    string
@@ -91,6 +92,9 @@ func Build(msgs []MessageInput, gap time.Duration) []Utterance {
 	}
 	flush()
 
+	for i := range result {
+		result[i].Position = i
+	}
 	return result
 }
 

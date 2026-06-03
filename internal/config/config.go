@@ -17,6 +17,7 @@ type Config struct {
 	Sync          SyncConfig
 	Transcription TranscriptionConfig
 	Utterance     UtteranceConfig
+	Rerank        RerankConfig
 }
 
 // SyncConfig controls Telegram history pagination rate limiting and FLOOD_WAIT handling.
@@ -55,6 +56,17 @@ type TranscriptionConfig struct {
 	// If all attempts return Pending=true, the message is skipped without marking
 	// transcribed_at — it will be retried on the next worker run.
 	PollAttempts int `env:"TRANSCRIPTION_POLL_ATTEMPTS" envDefault:"2"`
+}
+
+// RerankConfig controls the length-sigmoid bonus applied after BM25 scoring.
+// Formula: final_score = bm25_score × n_eff / (n_eff + K), n_eff = min(tokens, Cap).
+type RerankConfig struct {
+	// K is the inflection point: at token_count=K the utterance keeps 50% of its BM25 score.
+	// Lower K = more aggressive penalty on short utterances.
+	K float64 `env:"RERANK_LENGTH_K"   envDefault:"10"`
+	// Cap is the maximum token count used in the formula.
+	// Prevents very long utterances from dominating purely through length.
+	Cap int `env:"RERANK_LENGTH_CAP" envDefault:"100"`
 }
 
 // UtteranceConfig controls how consecutive messages are grouped into semantic utterances.
@@ -132,6 +144,7 @@ type CLIConfig struct {
 	App       AppConfig
 	Postgres  PostgresConfig
 	Utterance UtteranceConfig
+	Rerank    RerankConfig
 }
 
 // LoadCLI parses only the application and database configuration.
