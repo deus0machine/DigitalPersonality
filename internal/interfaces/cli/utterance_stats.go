@@ -89,6 +89,7 @@ func (r *Runner) UtteranceStats(ctx context.Context, args []string) error {
 	fmt.Printf("    Mixed (voice+text):  %5d  (%s)\n", mixed, pct(mixed, n))
 	fmt.Printf("    Voice in burst:     %5d  (%s)\n", voiceInBurst, pct(voiceInBurst, n))
 
+	printTokenLengthAudit(utts)
 	return nil
 }
 
@@ -240,4 +241,107 @@ func uttPercentile(sorted []int, p int) int {
 		idx = len(sorted) - 1
 	}
 	return sorted[idx]
+}
+
+// uttLengthEntry holds per-utterance data for the token-length audit.
+type uttLengthEntry struct {
+	tokens     int
+	msgCount   int
+	span       time.Duration
+	isOutgoing bool
+	chatTitle  string
+	preview    string
+}
+
+// printTokenLengthAudit prints token-length percentiles, bucket distribution,
+// and the top-10 longest utterances. Used to decide whether embeddings need
+// chunking before migration 000008 (utterance_embeddings schema).
+//
+// Token count is approximated as len(runes)/4 — accurate enough for the
+// chunking threshold decision; no external tokenizer dependency required.
+func printTokenLengthAudit(utts []utterance.Utterance) {
+	lengths := make([]int, 0, len(utts))
+	entries := make([]uttLengthEntry, 0, len(utts))
+
+	for _, u := range utts {
+		tok := len([]rune(u.Text)) / 4
+		if tok < 1 {
+			tok = 1
+		}
+		lengths = append(lengths, tok)
+		entries = append(entries, uttLengthEntry{
+			tokens:     tok,
+			msgCount:   u.MessageCount,
+			span:       u.EndedAt.Sub(u.StartedAt).Round(time.Second),
+			isOutgoing: u.IsOutgoing,
+			chatTitle:  u.ChatTitle,
+			preview:    truncate(u.Text, 60),
+		})
+	}
+
+	sort.Ints(lengths)
+	n := len(lengths)
+
+	fmt.Println()
+	fmt.Println("  Token length (approx: runes/4):")
+	fmt.Printf("    P50:  %5d\n", uttPercentile(lengths, 50))
+	fmt.Printf("    P75:  %5d\n", uttPercentile(lengths, 75))
+	fmt.Printf("    P90:  %5d\n", uttPercentile(lengths, 90))
+	fmt.Printf("    P95:  %5d  ← chunking signal\n", uttPercentile(lengths, 95))
+	fmt.Printf("    P99:  %5d\n", uttPercentile(lengths, 99))
+	fmt.Printf("    Max:  %5d\n", lengths[n-1])
+
+	var b64, b128, b256, b512, b1024, b1024p int
+	for _, t := range lengths {
+		switch {
+		case t < 64:
+			b64++
+		case t < 128:
+			b128++
+		case t < 256:
+			b256++
+		case t < 512:
+			b512++
+		case t < 1024:
+			b1024++
+		default:
+			b1024p++
+		}
+	}
+	gt256 := b512 + b1024 + b1024p
+	gt512 := b1024 + b1024p
+	gt1024 := b1024p
+
+	fmt.Println()
+	fmt.Println("  Bucket distribution:")
+	fmt.Printf("    <64:       %6d  (%s)\n", b64, pct(b64, n))
+	fmt.Printf("    64–128:    %6d  (%s)\n", b128, pct(b128, n))
+	fmt.Printf("    128–256:   %6d  (%s)\n", b256, pct(b256, n))
+	fmt.Printf("    256–512:   %6d  (%s)\n", b512, pct(b512, n))
+	fmt.Printf("    512–1024:  %6d  (%s)\n", b1024, pct(b1024, n))
+	fmt.Printf("    >1024:     %6d  (%s)\n", b1024p, pct(b1024p, n))
+	fmt.Println()
+	fmt.Printf("  >256 tokens:   %s\n", pct(gt256, n))
+	fmt.Printf("  >512 tokens:   %s\n", pct(gt512, n))
+	fmt.Printf("  >1024 tokens:  %s\n", pct(gt1024, n))
+
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].tokens > entries[j].tokens
+	})
+	limit := min(10, len(entries))
+
+	fmt.Println()
+	fmt.Printf("  Top-%d longest utterances by token count:\n\n", limit)
+	fmt.Printf("  %3s  %6s  %4s  %6s  %s\n", "#", "TOKENS", "MSGS", "SPAN", "PREVIEW")
+	printSeparator()
+	for i, e := range entries[:limit] {
+		dir := "←"
+		if e.isOutgoing {
+			dir = "→"
+		}
+		fmt.Printf("  %3d  %6d  %4d  %6s  %s [%s] %s\n",
+			i+1, e.tokens, e.msgCount, formatDuration(e.span),
+			dir, truncate(e.chatTitle, 14), e.preview)
+	}
+	fmt.Println()
 }

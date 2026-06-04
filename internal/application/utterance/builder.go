@@ -28,8 +28,9 @@ type MessageInput struct {
 // Utterance is one complete communicative turn by a single author.
 // May span multiple raw messages when the author sends in rapid succession.
 type Utterance struct {
-	Position     int    // stable index in the Build() result slice; set post-construction
-	AuthorID     int64
+	FirstMessageID int64  // DB id of the first message in the group; stable embedding key
+	Position       int    // stable index in the Build() result slice; set post-construction
+	AuthorID       int64
 	ChatID       int64
 	ChatTitle    string
 	StartedAt    time.Time
@@ -120,15 +121,16 @@ func toUtterance(group []MessageInput) (Utterance, bool) {
 	}
 
 	return Utterance{
-		AuthorID:     group[0].AuthorID,
-		ChatID:       group[0].ChatID,
-		ChatTitle:    group[0].ChatTitle,
-		StartedAt:    group[0].SentAt,
-		EndedAt:      group[len(group)-1].SentAt,
-		Text:         strings.Join(parts, " "),
-		MessageCount: len(group),
-		IsOutgoing:   group[0].IsOutgoing,
-		HasVoice:     voiceCount > 0,
-		VoiceCount:   voiceCount,
+		FirstMessageID: group[0].ID,
+		AuthorID:       group[0].AuthorID,
+		ChatID:         group[0].ChatID,
+		ChatTitle:      group[0].ChatTitle,
+		StartedAt:      group[0].SentAt,
+		EndedAt:        group[len(group)-1].SentAt,
+		Text:           strings.Join(parts, " "),
+		MessageCount:   len(group),
+		IsOutgoing:     group[0].IsOutgoing,
+		HasVoice:       voiceCount > 0,
+		VoiceCount:     voiceCount,
 	}, true
 }

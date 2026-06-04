@@ -118,9 +118,18 @@ type TelegramConfig struct {
 }
 
 type OpenAIConfig struct {
-	APIKey         string `env:"OPENAI_API_KEY"` // required in Phase 5 (embedding pipeline)
+	APIKey         string `env:"OPENAI_API_KEY"` // reserved for Phase 6 LLM persona
 	EmbeddingModel string `env:"OPENAI_EMBEDDING_MODEL" envDefault:"text-embedding-3-small"`
 	BatchSize      int    `env:"OPENAI_EMBEDDING_BATCH_SIZE" envDefault:"100"`
+}
+
+// OllamaConfig configures the local Ollama embedding server.
+// EmbeddingModel must match the model name shown by `ollama list`.
+// Set EmbeddingModel to "" to disable vector/embed commands.
+type OllamaConfig struct {
+	Host           string `env:"OLLAMA_HOST"            envDefault:"http://localhost:11434"`
+	EmbeddingModel string `env:"OLLAMA_EMBEDDING_MODEL" envDefault:"bge-m3"`
+	EmbedBatchSize int    `env:"OLLAMA_EMBED_BATCH_SIZE" envDefault:"10"`
 }
 
 type EmbeddingConfig struct {
@@ -140,11 +149,13 @@ func Load() (*Config, error) {
 
 // CLIConfig is a minimal config for read-only CLI inspection commands.
 // It does not require Telegram credentials.
+// Ollama is optional: if EmbeddingModel is empty, vector/embed commands are disabled.
 type CLIConfig struct {
 	App       AppConfig
 	Postgres  PostgresConfig
 	Utterance UtteranceConfig
 	Rerank    RerankConfig
+	Ollama    OllamaConfig
 }
 
 // LoadCLI parses only the application and database configuration.

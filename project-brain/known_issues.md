@@ -18,7 +18,7 @@
 **Проблема**: в каналах и некоторых группах `msg.FromID` отсутствует. `resolveSenderID` возвращает 0.
 **Текущее поведение**: sender_id хранится как NULL (через nullInt64(0)).
 **Риск**: агрегация по sender_id исключает эти сообщения.
-**Решение**: не планируется пока — анонимные посты не являются личными сообщениями.
+**Решение**: не планируется — анонимные посты не являются личными сообщениями.
 
 ### KI-002 — Удалённые аккаунты
 **Проблема**: пользователь удалил аккаунт → его данные в Telegram API возвращают пустые поля.
@@ -28,15 +28,11 @@
 
 ### KI-003 — RESOLVED: Flood wait (420)
 **Была проблема**: `MessagesGetHistory` при FLOOD_WAIT помечал весь dialog как failed.
-Большие ценные диалоги пропускались полностью, backfill становился неполным.
 **Решение (2026-05-30)**:
-- `fetchHistoryWithRetry` в `telegram/client.go` — retry с exponential backoff
-- `tgerr.AsFloodWait(err)` — правильное определение FLOOD_WAIT (не как ошибки бизнес-логики)
-- Формула sleep: `floodWait × multiplier^(attempt-1) + jitter`
-- Лог WARN до исчерпания retries, лог ERROR только при окончательном провале
-- Проактивный throttle: `SYNC_HISTORY_REQUEST_DELAY=200ms` между page requests
-- Конфиг: `SYNC_FLOOD_MAX_RETRIES`, `SYNC_FLOOD_JITTER`, `SYNC_FLOOD_BACKOFF_MULT`
-- ADR-0006 описывает полное решение и trade-offs
+- `fetchHistoryWithRetry` — retry с exponential backoff
+- `tgerr.AsFloodWait(err)` — корректное определение FLOOD_WAIT
+- Проактивный throttle: `SYNC_HISTORY_REQUEST_DELAY=200ms`
+- ADR-0006 описывает полное решение
 
 ### KI-004 — Sticker set name
 **Проблема**: `DocumentAttributeSticker.Stickerset` возвращает InputStickerSetID, не имя.
@@ -51,9 +47,8 @@
 **Решение**: разрешение требует API call — отложено до Phase 5+.
 
 ### KI-006 — Megagroup vs Supergroup
-**Проблема**: Telegram называет большие группы "megagroup" (ch.Megagroup = true), код маппит в ChatTypeSupergroup.
-**Текущее поведение**: корректно, но scoring для supergroup и group одинаков.
-**Риск**: активные megagroup могут получить тот же score что и маленькие группы.
+**Проблема**: код маппит megagroup в ChatTypeSupergroup, scoring одинаков.
+**Риск**: активные megagroup получают тот же score что и маленькие группы.
 **Решение**: можно добавить member count сигнал — отложено.
 
 ---
@@ -61,8 +56,7 @@
 ## MTProto Limitations
 
 ### KI-007 — Session persistence
-**Проблема**: session файл (`*.session`) должен быть защищён (mode 0600).
-**Текущее поведение**: клиент создаёт файл, но chmod применяется в os-level вручную.
+**Проблема**: session файл должен быть защищён (mode 0600), chmod применяется вручную.
 **Риск**: в Docker/Linux разрешения могут наследоваться неправильно.
 **Решение**: проверять разрешения при старте — не реализовано.
 
@@ -79,7 +73,7 @@
 **Проблема**: score 0.50 для ботов — возможно слишком высоко для spam/service ботов.
 **Текущее поведение**: все боты синхронизируются (выше SyncThreshold 0.35).
 **Риск**: засорение памяти бесполезными bot-диалогами.
-**Решение**: можно добавить blocklist по username или снизить threshold до 0.40+.
+**Решение**: можно добавить blocklist по username — отложено.
 
 ### KI-010 — Broadcast channels без участия
 **Текущее поведение**: score 0.10 — ниже порога 0.35, не синхронизируются.
@@ -87,10 +81,9 @@
 **Решение**: нет простого способа определить участие через ListDialogs — известное ограничение.
 
 ### KI-011 — Группы с низкой активностью пользователя
-**Проблема**: group member score 0.60 не учитывает что пользователь может быть неактивен.
-**Текущее поведение**: синхронизируются все группы выше порога.
+**Проблема**: group member score 0.60 не учитывает реальную активность пользователя.
 **Риск**: много входящих сообщений без исходящих.
-**Решение**: можно добавить post-sync фильтрацию по outgoing_ratio — отложено.
+**Решение**: post-sync фильтрация по outgoing_ratio — отложено.
 
 ---
 
@@ -100,7 +93,7 @@
 **Проблема**: `to_tsvector('simple', ...)` не делает стемминг для русского языка.
 **Текущее поведение**: поиск точный по словам (без морфологии).
 **Риск**: "свободен" не найдёт "свободного".
-**Решение**: установить `postgresql-15-rum` или `pg_catalog.russian` конфигурацию — Phase 5+.
+**Решение**: `pg_catalog.russian` конфигурация — Phase 5+.
 
 ### KI-013 — TopEmoji и TopSlang не реализованы
 **Проблема**: поля `TopEmoji`, `TopSlang` в PersonalityReport всегда пустые.
@@ -108,7 +101,7 @@
 **Решение**: SQL агрегация по emoji через regexp — следующая итерация.
 
 ### KI-014 — EpisodeHit без ChatTitle
-**Проблема**: при поиске эпизодов ChatTitle приходит из JOIN с chats — может быть пустым если чат не уперсертирован.
+**Проблема**: при поиске эпизодов ChatTitle может быть пустым если чат не уперсертирован.
 **Текущее поведение**: пустая строка в этом случае.
 **Решение**: COALESCE('', 'Unknown') в запросе.
 
@@ -117,82 +110,137 @@
 ## CLI Delivery
 
 ### KI-017 — TopEmoji и TopSlang всегда пустые в CLI personality
-**Проблема**: `PersonalityReport.TopEmoji` и `TopSlang` инициализируются пустыми картами (KI-013).
-**Текущее поведение**: секции "Top Emoji" и "Top Slang Markers" не отображаются в выводе `personality`.
+**Проблема**: `PersonalityReport.TopEmoji` и `TopSlang` пусты (KI-013).
 **Риск**: пользователь не видит emoji/slang аналитику.
-**Решение**: см. KI-013 — SQL агрегация по personality_signals.
+**Решение**: см. KI-013.
 
 ### KI-018 — personality без аргументов может быть длинным
-**Проблема**: `personality` без chat-id выводит детальные отчёты для всех чатов.
-**Текущее поведение**: компактная таблица (одна строка на чат) — это намеренно.
-**Риск**: при большом числе чатов всё равно может быть длинный вывод.
-**Решение**: добавить `--limit N` или пагинацию — при необходимости в Phase 5.
+**Проблема**: при большом числе чатов вывод длинный.
+**Текущее поведение**: компактная таблица (одна строка на чат) — намеренно.
+**Решение**: добавить `--limit N` при необходимости.
 
 ---
 
 ## Memory Window Architecture
 
 ### KI-019 — Orphan semantic docs (non-critical)
-**Проблема**: при первом запуске `ComputeParticipationWindows` для social/passive_consumption чата,
-некоторые сообщения получают `in_memory_window = FALSE`, но их записи в `message_semantic` остаются.
-**Текущее поведение**: orphan docs не попадают в retrieval queries (filter `in_memory_window=TRUE`)
-и не embed'ятся (`ListPendingEmbedding` теперь JOIN с messages + фильтр `in_memory_window`).
-**Риск**: небольшое занятое место в `message_semantic`. Не влияет на корректность.
-**Проверка**: V5 в `docs/sql/inspect_windows.sql` покажет count orphan docs.
-**Решение**: плановая чистка `DELETE FROM message_semantic WHERE message_id IN (SELECT id FROM messages WHERE NOT in_memory_window)` — при необходимости.
+**Проблема**: при первом `ComputeParticipationWindows` часть `message_semantic` записей
+остаётся для сообщений с `in_memory_window = FALSE`.
+**Текущее поведение**: orphan docs не попадают в retrieval и не embed'ятся — корректность не нарушена.
+**Риск**: небольшое лишнее место в `message_semantic`.
+**Проверка**: V5 в `docs/sql/inspect_windows.sql`.
+**Решение**: `DELETE FROM message_semantic WHERE message_id IN (SELECT id FROM messages WHERE NOT in_memory_window)` — при необходимости.
 
 ### KI-020 — Personality signals для out-of-window сообщений (исторические)
-**Проблема**: до windowing все сообщения проходили Layer 3. После первого compute,
-сигналы для non-window сообщений остаются в `personality_signals`.
-**Текущее поведение**: новые сигналы для non-window сообщений не создаются (sync/engine.go
-не вызывает extractor для non-window messages после rebuild). Старые остаются.
+**Проблема**: до windowing все сообщения проходили Layer 3 — старые сигналы остаются.
 **Риск**: небольшое искажение personality аналитики для social чатов.
 **Проверка**: V4 в `docs/sql/inspect_windows.sql`.
-**Решение**: при необходимости — `DELETE FROM personality_signals WHERE message_id IN (SELECT id FROM messages WHERE NOT in_memory_window)`.
+**Решение**: DELETE при необходимости.
 
 ### KI-021 — Window computation не запускается для passive_consumption (score < threshold)
-**Проблема**: подписные broadcast каналы имеют score 0.10 — ниже SyncThreshold 0.35.
-Они никогда не синхронизируются, поэтому `ComputeAndRebuild` для них не вызывается.
-**Текущее поведение**: если чат когда-либо был синхронизирован (вручную или при изменении threshold),
-его сообщения имеют `in_memory_window = TRUE` по default. Window computation не запускался.
-**Риск**: passive_consumption чаты без windowing проходят через retrieval как будто full-sync.
-**Решение**: можно снизить SyncThreshold для passive_consumption — отложено. V7 в SQL toolkit покажет такие чаты.
+**Проблема**: broadcast каналы (score 0.10) не синхронизируются, ComputeAndRebuild не вызывается.
+**Риск**: если такой чат был синхронизирован вручную — его сообщения идут в retrieval без windowing.
+**Решение**: V7 в SQL toolkit покажет такие чаты. SyncThreshold для passive_consumption — отложено.
 
 ---
 
-## Voice Transcription Blockers
+## Voice Transcription
 
-### KI-022 — access_hash not stored (blocks transcription for private/channel/supergroup)
-**Проблема**: `chats.access_hash` не хранится. После перезапуска приложения невозможно построить
-`InputPeerUser` (private чаты) или `InputPeerChannel` (channels, supergroups).
-Только `ChatTypeGroup` работает без access_hash (`InputPeerChat{ChatID}`).
-**Влияние**: `messages.transcribeAudio` недоступен для interpersonal чатов — там сосредоточена основная часть ценных голосовых сообщений.
-**Решение (Phase 5.1)**:
-- `migrations/000007`: `ALTER TABLE chats ADD COLUMN access_hash BIGINT NOT NULL DEFAULT 0`
+### KI-022 — RESOLVED: access_hash not stored
+**Была проблема**: невозможно построить InputPeer после перезапуска для private/channel/supergroup.
+**Решение (migration 000007, Phase 5.1)**:
+- `ALTER TABLE chats ADD COLUMN access_hash BIGINT NOT NULL DEFAULT 0`
 - `entity.Chat.AccessHash int64`
-- `ChatRepository.Upsert` → сохраняет access_hash
-- `sync/engine.go` → `AccessHash: s.dialog.AccessHash` при chatRepo.Upsert
-  (`port.DialogInfo.AccessHash` уже доступен — просто не пробрасывается)
+- `ChatRepository.Upsert` сохраняет access_hash
+- `sync/engine.go` пробрасывает `s.dialog.AccessHash`
 
-### KI-023 — transcribed_at отсутствует в message_semantic
-**Проблема**: нет колонки для отслеживания статуса транскрипции. Без неё worker не может
-различить "не транскрибировано" и "транскрибировано с пустым результатом".
-**Влияние**: нет идемпотентного checkpoint для transcription worker.
-**Решение (Phase 5.1)**:
-- `migrations/000007`: `ALTER TABLE message_semantic ADD COLUMN transcribed_at TIMESTAMPTZ`
-- `entity.SemanticDocument.TranscribedAt *time.Time`
-- `SemanticRepository.MarkTranscribed(ctx, messageID, transcript, tokenCount) error`
+### KI-023 — RESOLVED: transcribed_at отсутствует в message_semantic
+**Была проблема**: нет idempotent checkpoint для transcription worker.
+**Решение (migration 000007, Phase 5.1)**:
+- `ALTER TABLE message_semantic ADD COLUMN transcribed_at TIMESTAMPTZ`
+- Worker queue: `WHERE transcribed_at IS NULL`
+
+---
+
+## Utterance Embedding Pipeline (Phase 5.3)
+
+### KI-024 — Staleness граничных utterances после sync
+**Проблема**: при добавлении нового сообщения, которое попадает в gap последнего utterance чата,
+тот же `first_message_id` начинает представлять другой текст (добавилось новое сообщение в группу).
+Хранимый вектор остаётся старым, `FilterUnembedded` видит ID как уже embedded — не обновляет.
+
+**Пример**:
+```
+До sync:  {A(10:00), B(10:02)} → utterance, first_message_id=A.id, вектор V1
+После:    C(10:03) от того же автора → utterance теперь {A, B, C}
+          V1 содержит text(A)+text(B), должен содержать text(A)+text(B)+text(C)
+```
+
+**Масштаб**: bounded числом активных чатов (сотни, не тысячи utterances одновременно).
+**Риск**: low — незначительное искажение retrieval для самых свежих utterances.
+**Решение**: принято как known limitation для MVP. Полное исправление требует материализации utterances
+с `text_hash` колонкой для детекции изменений.
+**Триггер для решения**: доля stale utterances > 5% при аудите качества retrieval.
+
+### KI-025 — embed-utterances пересобирает весь корпус при каждом запуске
+**Проблема**: `FetchAllInWindowMessages` → `Build()` загружает все 480k сообщений и строит
+207k utterances каждый раз, даже если после sync добавилось 500 новых сообщений.
+**Текущее поведение**: время запуска ~5-10 сек при 480k сообщениях, ~100-200MB RAM.
+**Риск**: при corpus > 1M сообщений время вырастет до 30-60 сек, RAM до 500MB+.
+**Решение**: принято для MVP (текущий масштаб приемлем). Инкрементальный подход потребует
+либо материализации utterances, либо sync cursor для embeddings.
+**Триггер для решения**: corpus > 1M сообщений или rebuild > 30 сек.
+
+### KI-026 — HNSW индекс не поддерживает фильтрацию по gap/model
+**Проблема**: pgvector HNSW ANN не умеет эффективно фильтровать по `WHERE gap_seconds = N`
+до поиска. При наличии embeddings с разными gap значениями `SearchByVector` вернёт
+смешанные результаты. Partial index решает проблему только для одной конфигурации.
+**Текущее поведение**: таблица содержит embeddings только одного gap (текущего). Проблема
+не проявляется пока gap не менялся.
+**Риск**: если gap изменится без TRUNCATE, vector search вернёт stale embeddings без ошибки.
+**Решение для MVP**: при смене `UTTERANCE_GAP_SECONDS` выполнить:
+```sql
+DELETE FROM utterance_embeddings;
+```
+затем re-run `embed-utterances`. `StoredGapSeconds()` в worker детектирует расхождение и падает с ошибкой.
+**Триггер для изменения архитектуры**: появление второй embedding модели или второго gap параметра.
+
+### KI-027 — Utterances не материализованы в БД
+**Проблема**: utterances — runtime DTOs, не имеют стабильных DB-идентификаторов.
+`first_message_id` используется как суррогатный ключ, но не является FK к таблице utterances
+(такой таблицы нет). Нельзя делать join'ы, нельзя строить cross-source queries.
+**Текущее поведение**: для Phase 5.3 (Telegram-only, single gap) достаточно.
+**Риск**: при добавлении второго источника памяти (email, GitHub) потребуются stable utterance IDs.
+**Решение**: материализация через `utterances` + `utterance_messages` таблицы — Phase 5.x или при
+появлении второго источника. `text_hash` решит также KI-024.
+
+### KI-028 — min_tokens фильтр (approx runes/4) может давать ложные срабатывания
+**Проблема**: `len([]rune(text))/4 < 10` — аппроксимация. Для русского текста
+1 руна ≈ 1-2 токена (cl100k_base), не 0.25 токена. Реальный порог ~10 токенов
+соответствует ~40-80 рунам, а не 40 рунам как рассчитывает формула.
+**Текущее поведение**: фильтр скипает utterances с `len(runes) < 40`. Для русского текста
+это примерно 5-8 слов. Часть коротких, но семантически ценных utterances может скипаться.
+**Риск**: low — utterances с 5-8 русскими словами редко несут уникальный personality сигнал.
+**Решение**: добавить tiktoken-совместимый счётчик или увеличить порог до `len(runes) < 20`
+(~3-4 русских слова) для более точного фильтра. Не критично для MVP.
+
+### KI-029 — Latency query embedding для интерактивного use case
+**Проблема**: каждый вызов `retrieve-vector` делает HTTP запрос к OpenAI API для embed query
+(100-300ms). Для CLI это приемлемо. Для HTTP API (Phase 6) с ожидаемым SLA < 500ms это blocker.
+**Текущее поведение**: `retrieve-vector` — CLI batch command, latency не критична.
+**Риск**: при добавлении HTTP API в Phase 6 потребуется либо local embedding model,
+либо query embedding cache.
+**Решение**: отложено до Phase 6. Зафиксировать при проектировании HTTP API.
 
 ---
 
 ## Architectural Concerns
 
 ### KI-015 — app.go вырастает
-**Проблема**: `internal/app/app.go` уже содержит всю сборку зависимостей линейно.
-**Риск**: при добавлении Phase 5 (embedding worker, HTTP server) станет God Object.
+**Проблема**: `internal/app/app.go` содержит всю сборку зависимостей линейно.
+**Риск**: при добавлении HTTP server (Phase 6) станет God Object.
 **Решение**: разбить на подсборки (`buildSyncEngine`, `buildRetrievalStack`) — при необходимости.
 
 ### KI-016 — Нет HTTP delivery layer
-**Проблема**: `retrieval.Service` подключён только к CLI, не к HTTP API.
-**Текущее состояние**: CLI покрывает inspection use case, HTTP нужен для Phase 6 (LLM persona).
+**Текущее состояние**: `retrieval.Service` подключён только к CLI.
 **Решение**: Phase 6 добавит HTTP endpoint поверх того же retrieval.Service.

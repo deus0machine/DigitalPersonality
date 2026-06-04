@@ -1,18 +1,18 @@
 # Current State
 
-_Последнее обновление: 2026-05-31 (Phase 4.11 — Validation & Inspection CLI)_
+_Последнее обновление: 2026-06-03 (Phase 5.3 MVP — Utterance Embedding Infrastructure)_
 
 ## Реализованные подсистемы
 
 ### Layer 1 — Raw Storage
 - Таблица `messages`: все поля включая `is_forwarded`, `forward_from_id`, `forward_date`, `edit_date`
-- Таблица `chats`: `relevance_score`, `relevance_reason`, `personality_surface`
+- Таблица `chats`: `relevance_score`, `relevance_reason`, `personality_surface`, `access_hash`
 - Таблица `users`, `sync_cursors`
 - Upsert по `(telegram_id, chat_id)` — идемпотентная запись
 - `MessageRepository`: Upsert, GetByID, GetByTelegramID, List, GetCursor, SaveCursor, MarkDeleted
 
 ### Layer 2 — Semantic Normalization
-- Таблица `message_semantic`: нормализованный текст без служебных символов
+- Таблица `message_semantic`: нормализованный текст, `transcribed_at` (voice checkpoint)
 - `SemanticNormalizer` (infrastructure/normalizer): чистит текст для поиска
 - `SemanticRepository`: Upsert, GetByMessageID
 - FTS-индекс: `text_search tsvector GENERATED ALWAYS AS (to_tsvector('simple', ...)) STORED`
@@ -32,7 +32,7 @@ _Последнее обновление: 2026-05-31 (Phase 4.11 — Validation 
 
 ### Telegram Gateway
 - `internal/infrastructure/telegram/`: gotd/td клиент
-- `client.go`: Run/Self/ListDialogs/GetHistory, session persistence (файл mode 0600)
+- `client.go`: Run/Self/ListDialogs/GetHistory, session persistence (файл mode 0600), flood-wait retry с exponential backoff
 - `mapper.go`: `mapMessage`, `mapDialogInfo`, `resolveForward`, `resolveEditDate`
 - `auth.go`: интерактивная авторизация через терминал
 
@@ -43,122 +43,134 @@ _Последнее обновление: 2026-05-31 (Phase 4.11 — Validation 
 - ВСЕ чаты апсертируются с оценками, даже исключённые — inspectability
 
 ### Participation-Centered Memory Windows (Phase 4.10)
+- `in_memory_window BOOLEAN DEFAULT TRUE` на `messages` (migration 000006)
+- `WindowRepository`: `ComputeParticipationWindows` (3-step atomic SQL) + `ListPendingRebuild`
+- `WindowExpander` use case: compute → retroactive Layer 2-3 rebuild (batched, idempotent)
+- `WindowConfig`: `WINDOW_BEFORE=10`, `WINDOW_AFTER=10` (env vars)
+- `needsWindowing(surface)`: social/passive_consumption → windowed; остальные → full-sync
+- Retrieval layer: `AND m.in_memory_window = TRUE` во всех message queries
 
-Architecture: group/channel dialogs generate huge volumes of noise — only messages near
-user participation (outgoing anchors) are relevant to personality/semantic/episodic pipelines.
+### Utterance Pipeline (Phase 4.x + 5.3)
 
-**`in_memory_window` column** (`migration 000006`):
-- `BOOLEAN NOT NULL DEFAULT TRUE` on `messages` — zero breaking change; all existing messages stay active
-- `TRUE`: message flows through Layers 2-4 (semantic, personality, episodic)
-- `FALSE`: stored in Layer 1 only — inspectable, not processed
+**Runtime группировка** (`application/utterance/builder.go`):
+- `Build(msgs, gap)` — детерминированная группировка по автору + временному gap
+- `Utterance` struct: `FirstMessageID`, `Text`, `MessageCount`, `IsOutgoing`, `HasVoice`, `VoiceCount`
+- `FirstMessageID = group[0].ID` — стабильный ключ для embedding storage
+- Utterances — in-memory DTOs, не материализованы в БД
 
-**WindowRepository** (`domain/repository/window.go` + `infrastructure/postgres/repository/window.go`):
-- `ComputeParticipationWindows(chatID, before, after)` — 3-step atomic SQL transaction:
-  1. Reset non-outgoing messages → `in_memory_window = FALSE`
-  2. CTE with `ROW_NUMBER()` expands ±before/after rows around each outgoing anchor → `TRUE`
-  3. Direct reply targets of outgoing messages → `TRUE`
-- `ListPendingRebuild(chatID, limit)` — messages with `in_memory_window=TRUE` but no semantic doc
+**BM25 Retrieval** (`application/utterance/scorer.go`, `rerank.go`):
+- `BM25Scorer`: term-frequency ranking по всем in-window utterances
+- `RerankScorer`: length-sigmoid reranker поверх BM25 (K=10, Cap=100)
+- `RetrievalService`: fetch → build → score → limit
+- `RetrieveWithContext`: adds surrounding utterances per hit (window N)
 
-**WindowExpander use case** (`application/window/expander.go`):
-- `ComputeAndRebuild(chatID)` — runs computation then retroactive Layer 2-3 rebuild
-- `rebuildLayers` — batched (100/batch): `ListPendingRebuild` → normalize → semantic upsert → personality signals
-- Layer 4 (episodes) runs after via existing `episode.Builder`
+**Utterance Stats CLI** (`interfaces/cli/utterance_stats.go`):
+- `utterance-stats [chat-id]`: message count percentiles, size buckets, voice stats
+- **Token length audit** (добавлено Phase 5.3): P50/P75/P90/P95/P99/Max в аппрокс. токенах,
+  bucket distribution, %>256/>512/>1024, top-10 longest utterances с span и preview
+- `compare-gaps <chat-id>`: сравнение 4 gap-значений (30/60/120/300s)
+- `inspect-bursts <chat-id>`: top-50 по числу сообщений
 
-**WindowConfig** (`config.go`): `WINDOW_BEFORE=10`, `WINDOW_AFTER=10` (env vars)
+**Корпусный аудит (проведён 2026-06-03)**:
+- 207,779 utterances из ~480k raw messages
+- P50=6 | P75=11 | P90=20 | P95=29 | P99=57 | Max=1923 токенов (approx runes/4)
+- 99% utterances < 64 токенов — chunking не нужен
+- Mean/Median messages per utterance = 2; P90 = 4
+- Вывод: `utterance_id PK` без `chunk_index`; min_tokens фильтр = 10
 
-**Surfaces and windowing**:
-- `social`, `passive_consumption` → windowed (noise-heavy group chats)
-- `interpersonal`, `self_expression`, `tool_interaction` → full-sync (flag stays TRUE)
-- `needsWindowing(surface)` predicate in `sync/engine.go` gates the decision
+### Utterance Embedding Infrastructure (Phase 5.3 MVP)
 
-**Retrieval + episode layer integration**:
-- `messageWhereClause`: `AND m.in_memory_window = TRUE` — all search queries respect window
-- `fetchReports`: counts only windowed messages (personality analytics exclude noise)
-- `ListUnepisodedMessages`: `AND m.in_memory_window = TRUE` — episodes built only from windowed messages
-- `ListPendingEmbedding`: `JOIN messages … WHERE m.in_memory_window = TRUE` — embedding pipeline skips orphan docs
+**Схема** (migration 000008):
+- `utterance_embeddings(first_message_id PK FK→messages, model_name, gap_seconds, embedded_at, vector(1536))`
+- HNSW индекс: `m=16, ef_construction=64`, cosine ops
+- `first_message_id` — стабильный ключ при фиксированном `UTTERANCE_GAP_SECONDS`
+- При смене gap: `DELETE FROM utterance_embeddings;` + re-run worker
 
-**Sync engine integration** (`sync/engine.go`):
-- `toSync []scored` carries surface through the loop (was `[]port.DialogInfo`)
-- After sync: `needsWindowing` → `windowExpander.ComputeAndRebuild` → `episodeBuilder.BuildForDialog`
+**Application interfaces** (`application/utterance/embedding.go`):
+- `Embedder`: `EmbedTexts(ctx, []string) ([][]float32, error)` + `EmbedQuery(ctx, string) ([]float32, error)`
+- `UtteranceEmbeddingRepository`: `FilterUnembedded`, `SaveBatch`, `SearchByVector`, `StoredGapSeconds`
+- `EmbeddingCandidate`, `VectorHit` — чистые Go-структуры без инфраструктурных зависимостей
+- Инвариант I1 соблюдён: application не импортирует `openai` или `pgx`
 
-**Window inspection CLI** (`interfaces/cli/windows.go`):
-- `windows` → coverage table: chat, surface, total, in-window, anchors, %retained, pending
-- `windows <chat-id>` → detail view + sample anchor windows (±5 context, 3 anchors preview)
+**VectorScorer** (`application/utterance/vector.go`):
+- Реализует `Scorer` — совместим с `RetrievalService` без изменений
+- Embed query → `SearchByVector` → map по `FirstMessageID` → `[]SearchResult`
+- Orphan embeddings (message вышел из in_memory_window) — silently skipped
+- `topK=50` candidates из pgvector, финальный limit применяет `RetrievalService`
+- Graceful: используется только при наличии `OPENAI_API_KEY`
 
-**SQL inspection toolkit** (`docs/sql/inspect_windows.sql`):
-- 8 inspection queries + 7 validation (sanity) queries
-- Validates: retained ratio anomalies, orphan anchors, episodes from non-window messages,
-  personality signals outside window, orphan semantic docs, embedding pipeline health
+**OpenAI client** (`infrastructure/openai/client.go`):
+- HTTP клиент без внешних SDK, `Timeout: 30s`
+- `EmbedTexts`: batch POST `/v1/embeddings`, `encoding_format=float`
+- `EmbedQuery`: single-text wrapper
+- Реализует `utterance.Embedder` — application layer зависит только от интерфейса
+
+**Postgres реализация** (`infrastructure/postgres/repository/utterance_embedding.go`):
+- `FilterUnembedded`: `SELECT ... WHERE first_message_id = ANY($1)` → diff со входом
+- `SaveBatch`: транзакция с individual INSERT ON CONFLICT DO NOTHING
+- `SearchByVector`: `ORDER BY vector <=> $1 LIMIT $2` (HNSW ANN)
+- `StoredGapSeconds`: gap drift detection для worker
+
+**embed-utterances CLI** (`interfaces/cli/embed.go`):
+- Gap drift detection: если stored gap ≠ current gap → ошибка с инструкцией
+- Token filter: skip utterances с `len([]rune(text))/4 < 10`
+- `FilterUnembedded` → batch embed (100/batch, 200ms delay) → `SaveBatch`
+- Идемпотентен: повторный запуск пропускает уже эмбеддированные
+
+**retrieve-vector CLI** (`interfaces/cli/retrieve_vector.go`):
+- Semantic retrieval через pgvector ANN
+- Показывает `similarity=` (1 - cosine distance), направление →/←, временной диапазон
+- Требует `OPENAI_API_KEY` и заполненной `utterance_embeddings`
+
+**Runner wire-up** (`interfaces/cli/runner.go`):
+- `embeddingRepo`: всегда инициализирован (без API-ключа используется только для StoredGapSeconds)
+- `embedder`, `vectorSvc`: `nil` если `OPENAI_API_KEY` не задан — graceful degradation
+- `CLIConfig.OpenAI OpenAIConfig` добавлен
 
 ### Sender Integrity Fix (Phase 4.9)
-- `port.HistoryPage.Participants []UserInfo` — участники каждой страницы из `v.Users` API response
-- `mapParticipants()` (telegram/mapper.go) — фильтрует `*tg.UserEmpty`, возвращает `[]UserInfo`
-- `upsertParticipants()` (sync/engine.go) — bulk upsert перед каждой страницей сообщений
-- `UserRepository.EnsureExists()` — `INSERT ... ON CONFLICT DO NOTHING` fallback для deleted accounts
-- `ingestMessage` — вызывает `EnsureExists` как belt-and-suspenders перед каждым message upsert
-- Устранён FK violation `messages_sender_id_fkey` для всех случаев: группы, личные чаты, подписанные посты каналов
+- `port.HistoryPage.Participants []UserInfo` — из `v.Users` каждого API response
+- `upsertParticipants()` — bulk upsert до обработки страницы
+- `UserRepository.EnsureExists()` — fallback для deleted accounts
+
+### Voice Transcription Infrastructure (Phase 5.1)
+- `chats.access_hash BIGINT` (migration 000007) — для пересборки InputPeer после рестарта
+- `message_semantic.transcribed_at TIMESTAMPTZ` — idempotent checkpoint worker'а
+- `runTranscribe()` в `cmd/server/main.go` — отдельный entry point
 
 ### CLI Delivery Layer
-- `internal/interfaces/cli/`: `Runner`, 5 команд, форматирование вывода
-- `runner.go`: Runner struct — только DB + retrieval service, без Telegram
-- `search.go`: FTS + trigram search, показывает MatchType + Rank
+- `runner.go`: Runner — только DB + services, без Telegram
+- `search.go`: FTS + trigram, MatchType + Rank
 - `episodes.go`: поиск по episode_semantic
-- `similar.go`: trigram similarity для поиска речевых паттернов
-- `personality.go`: обзорная таблица (без аргументов) и детальный отчёт (с chat-id)
-- `chats.go`: список всех синхронизированных чатов
-- `windows.go`: window coverage summary + detail с sample anchor windows
-- `validate.go`: `validate` + `inspect-chat` — качество памяти и per-chat диагностика
-- `config.LoadCLI()`: парсит только AppConfig + PostgresConfig, Telegram не требуется
-- `cmd/server/main.go`: роутинг на os.Args[1] — CLI команды или sync
-- ADR-0005: объяснение выбора CLI-first и отложенных embeddings
-
-### Validation & Inspection (Phase 4.11)
-
-**`validate`** — глобальный quality report:
-- Messages: total / in-window / outgoing counts + проценты
-- Episodes: count + avg size
-- Personality signals: count
-- Chats by surface: breakdown по PersonalitySurface
-- Автоматические warnings (5 проверок — см. ниже)
-- Top-20 чатов по объёму: score, surface, total, in-window, out%, episodes
-
-**Автоматические warnings**:
-- `< 10%` сообщений в memory windows → window computation не запускалась
-- `> 95%` сообщений в memory windows → windowing для social/passive_consumption не активно
-- 0 personality signals → Layer 3 не запускался
-- 0 episodes при >100 сообщениях → Layer 4 не запускался
-- Чаты с score >0.8 и 0 сообщений → возможный sync gap
-- Suspiciously low episode ratio (`< 0.5%`) при >500 сообщениях
-
-**`inspect-chat <chat-id>`** — детальный per-chat snapshot:
-- Chat ID, surface, score
-- Messages total / outgoing / in-window (с процентами)
-- Episode count
-- Sample participation windows (3 anchors × ±5 context messages, reusing WindowAnchors)
-
-### Retrieval Foundation (без embeddings)
-- `internal/application/retrieval/`: Query, MessageHit, EpisodeHit, PersonalityReport, Repository interface, Service
-- `internal/infrastructure/postgres/repository/retrieval.go`: полная реализация
-- SearchMessages: FTS (`websearch_to_tsquery`) → trigram fallback → filter-only
-- SearchEpisodes: FTS по episode_semantic
-- FindSimilar: trigram similarity для style clustering
-- PersonalityReport: hour distribution, length classification, episode count per chat
+- `similar.go`: trigram similarity для речевых паттернов
+- `personality.go`: обзорная таблица / детальный отчёт
+- `chats.go`: список чатов с relevance scores
+- `windows.go`: window coverage + detail + anchor preview
+- `validate.go`: глобальный quality report + автоматические warnings + top-20 чатов
+- `audit.go`: `retrieve-audit` — BM25 vs BM25+Rerank (10 test queries, LONG%, MULTI%, GAP)
+- `retrieve.go`: `retrieve`, `retrieve-debug`
+- `retrieve_context.go`: `retrieve-context`, `retrieve-context-debug`
+- `utterances.go`: `inspect-utterances`
+- `utterance_stats.go`: `utterance-stats`, `compare-gaps`, `inspect-bursts`
+- `embed.go`: `embed-utterances` — batch embedding worker
+- `retrieve_vector.go`: `retrieve-vector` — pure vector search
 
 ### App Assembly
 - `internal/app/app.go`: точка сборки всех зависимостей
-- `cmd/server/main.go`: godotenv.Load() → config.Load() → app.Run()
+- `cmd/server/main.go`: godotenv.Load() → config.Load() → dispatch
 - `docker-compose.yml`: postgres + pgvector, порт 5432
 
 ## Миграции
 
 | Файл | Что добавляет |
 |------|---------------|
-| 000001_init.up.sql | messages, chats, users, sync_cursors |
-| 000002_semantic.up.sql | message_semantic, personality_signals |
-| 000003_episodes.up.sql | episodes, episode_messages, episode_semantic |
-| 000004_chat_relevance.up.sql | relevance_score, relevance_reason, personality_surface на chats |
-| 000005_message_richness.up.sql | is_forwarded, forward_*, edit_date на messages; FTS + trigram индексы |
-| 000006_memory_window.up.sql | in_memory_window BOOLEAN DEFAULT TRUE на messages; два partial index |
+| 000001_init_schema | messages, chats, users, sync_cursors |
+| 000002_multi_layer_memory | message_semantic, personality_signals |
+| 000003_episodes | episodes, episode_messages, episode_semantic |
+| 000004_chat_relevance | relevance_score, relevance_reason, personality_surface на chats |
+| 000005_message_richness | is_forwarded, forward_*, edit_date; FTS + trigram индексы |
+| 000006_memory_window | in_memory_window BOOLEAN DEFAULT TRUE; два partial index |
+| 000007_voice_transcription | chats.access_hash BIGINT; message_semantic.transcribed_at |
+| 000008_utterance_embeddings | utterance_embeddings + HNSW индекс |
 
 ## Текущий entry point
 
@@ -166,23 +178,36 @@ user participation (outgoing anchors) are relevant to personality/semantic/episo
 
 | Команда | Что делает |
 |---|---|
-| _(нет аргументов)_ / `sync` | Telegram backfill → `app.Run()` → `engine.RunBackfill()` |
-| `search <query>` | Поиск сообщений (FTS + trigram) |
+| _(нет аргументов)_ / `sync` | Telegram backfill |
+| `transcribe` | Voice transcription worker (Telegram Premium) |
+| `search <query>` | FTS + trigram поиск сообщений |
 | `episodes <query>` | Поиск эпизодов |
-| `similar <text>` | Похожие сообщения по trigram |
+| `similar <text>` | Trigram similarity |
 | `personality [chat-id]` | Personality аналитика |
-| `chats` | Список всех чатов |
-| `windows` | Memory window coverage: все чаты |
-| `windows <chat-id>` | Window detail + sample anchor preview |
-| `validate` | Глобальный quality report + автоматические warnings + top-20 чатов |
-| `inspect-chat <chat-id>` | Детальный диагностический отчёт по одному чату + sample windows |
-
-Sync — batch job, не daemon. CLI команды — read-only, не требуют Telegram сессии.
+| `chats` | Список чатов |
+| `windows [chat-id]` | Memory window coverage |
+| `validate` | Глобальный quality report |
+| `inspect-chat <chat-id>` | Детальный per-chat диагностический отчёт |
+| `voice-stats` | Статистика голосовых сообщений |
+| `media-inspect` | Полный медиа аудит |
+| `inspect-utterances <chat-id>` | Preview utterances для чата |
+| `utterance-stats [chat-id]` | Quality metrics + token length audit |
+| `compare-gaps <chat-id>` | Сравнение gap=30/60/120/300s |
+| `inspect-bursts <chat-id>` | Top-50 длинных utterances |
+| `retrieve <query>` | BM25+Rerank retrieval |
+| `retrieve-debug <query>` | BM25+Rerank + pipeline timing |
+| `retrieve-context <query>` | Retrieval с контекстным окном |
+| `retrieve-context-debug <query>` | То же + метрики |
+| `retrieve-audit` | BM25 vs BM25+Rerank сравнение (10 queries) |
+| `embed-utterances` | Batch embedding worker (требует OPENAI_API_KEY) |
+| `retrieve-vector <query>` | Semantic retrieval через pgvector (требует OPENAI_API_KEY) |
 
 ## Что НЕ реализовано
 
-- Embedding pipeline (Phase 5): генерация векторов, pgvector запросы
-- HTTP API (Phase 6)
-- LLM persona simulation (Phase 6)
-- Real-time updates (webhook / long-poll)
-- TopEmoji, TopSlang в PersonalityReport (агрегация не написана, поля есть — KI-013)
+- **HybridScorer / RRF** — отложено до получения результатов `retrieve-vector` аудита
+- **retrieve-audit Hybrid колонка** — добавляется после подтверждения vector recall
+- **Episode embeddings** — Phase 5.4, после оценки utterance embeddings
+- **HTTP API** — Phase 6
+- **LLM persona simulation** — Phase 6
+- **Real-time updates** — не планируется в текущей архитектуре
+- **TopEmoji, TopSlang в PersonalityReport** — KI-013, SQL агрегация не написана

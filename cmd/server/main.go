@@ -106,7 +106,35 @@ func runCLI(args []string) error {
 		return runner.RetrieveContextDebug(ctx, args[1:])
 	case "retrieve-audit":
 		return runner.RetrieveAudit(ctx, args[1:])
+	case "embed-utterances":
+		return runner.EmbedUtterances(ctx, args[1:])
+	case "retrieve-vector":
+		return runner.RetrieveVector(ctx, args[1:])
 	default:
-		return fmt.Errorf("unknown command %q\n\nUsage:\n  sync                         Run Telegram backfill (default)\n  transcribe                   Backfill voice transcriptions (Telegram Premium)\n  search <query>               Search messages (FTS → trigram fallback)\n  episodes <query>             Search episodes by semantic text\n  similar <text>               Find messages with similar phrasing\n  personality [chat-id]        Show personality analytics\n  chats                        List all synced chats with scores\n  windows [chat-id]            Show memory window coverage and sample anchors\n  validate                     Run memory quality checks and show top-20 chats\n  inspect-chat <chat-id>       Detailed per-chat diagnostic with sample windows\n  voice-stats                  Voice message count and top-20 chats by voice volume\n  media-inspect                Full media audit: per-kind stats, top chats, technical assessment\n  inspect-utterances <chat-id> Group in-window messages into semantic utterances and preview\n  utterance-stats [chat-id]    Quality metrics for utterance grouping (all chats if omitted)\n  compare-gaps <chat-id>       Compare grouping at gap=30s/60s/120s/300s\n  inspect-bursts <chat-id>     Top-50 longest bursts to check for over-merging\n  retrieve \"<query>\"           BM25 retrieval over all in-window utterances\n  retrieve-debug \"<query>\"           Same as retrieve + pipeline timing stats\n  retrieve-context \"<query>\" [--window N]  Retrieval with surrounding utterance context\n  retrieve-context-debug \"<query>\"     Same + context token/time metrics\n  retrieve-audit                       Run 10 test queries and report retrieval quality", args[0])
+		return fmt.Errorf("unknown command %q\n\nUsage:\n"+
+			"  sync                              Run Telegram backfill (default)\n"+
+			"  transcribe                        Backfill voice transcriptions (Telegram Premium)\n"+
+			"  search <query>                    Search messages (FTS → trigram fallback)\n"+
+			"  episodes <query>                  Search episodes by semantic text\n"+
+			"  similar <text>                    Find messages with similar phrasing\n"+
+			"  personality [chat-id]             Show personality analytics\n"+
+			"  chats                             List all synced chats with scores\n"+
+			"  windows [chat-id]                 Show memory window coverage and sample anchors\n"+
+			"  validate                          Run memory quality checks and show top-20 chats\n"+
+			"  inspect-chat <chat-id>            Detailed per-chat diagnostic with sample windows\n"+
+			"  voice-stats                       Voice message count and top-20 chats by voice volume\n"+
+			"  media-inspect                     Full media audit: per-kind stats, top chats\n"+
+			"  inspect-utterances <chat-id>      Group in-window messages into utterances and preview\n"+
+			"  utterance-stats [chat-id]         Quality metrics for utterance grouping\n"+
+			"  compare-gaps <chat-id>            Compare grouping at gap=30s/60s/120s/300s\n"+
+			"  inspect-bursts <chat-id>          Top-50 longest bursts to check for over-merging\n"+
+			"  retrieve <query>                  BM25 retrieval over all in-window utterances\n"+
+			"  retrieve-debug <query>            Same as retrieve + pipeline timing stats\n"+
+			"  retrieve-context <query>          Retrieval with surrounding utterance context\n"+
+			"  retrieve-context-debug <query>    Same + context token/time metrics\n"+
+			"  retrieve-audit                    Run 10 test queries and report retrieval quality\n"+
+			"  embed-utterances                  Embed utterances via OpenAI (requires OPENAI_API_KEY)\n"+
+			"  retrieve-vector <query>           Semantic retrieval via pgvector (requires OPENAI_API_KEY)",
+			args[0])
 	}
 }
