@@ -281,4 +281,10 @@ type PersonalityReport struct {
 
 	// Top slang markers: marker → count.
 	TopSlang map[string]int
+
+	// Outgoing in-window stickers sent in this chat.
+	StickerCount int
+
+	// Top sticker emoticons in outgoing messages: emoticon → count.
+	TopStickers map[string]int
 }

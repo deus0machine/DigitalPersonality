@@ -127,43 +127,42 @@ func printDetailedReport(rep retrieval.PersonalityReport) {
 		fmt.Println()
 	}
 
-	// Top emoji
-	if len(rep.TopEmoji) > 0 {
-		fmt.Println("  Top Emoji:")
-		type kv struct {
-			k string
-			v int
-		}
-		pairs := make([]kv, 0, len(rep.TopEmoji))
-		for k, v := range rep.TopEmoji {
-			pairs = append(pairs, kv{k, v})
-		}
-		sort.Slice(pairs, func(i, j int) bool { return pairs[i].v > pairs[j].v })
-		limit := min(10, len(pairs))
-		for _, p := range pairs[:limit] {
-			fmt.Printf("    %s  %d\n", p.k, p.v)
-		}
-		fmt.Println()
-	}
+	printTopCounts("Top Emoji:", rep.TopEmoji, "%s  %d\n")
+	printTopCounts("Top Slang Markers:", rep.TopSlang, "%-20s  %d\n")
 
-	// Top slang
-	if len(rep.TopSlang) > 0 {
-		fmt.Println("  Top Slang Markers:")
-		type kv struct {
-			k string
-			v int
-		}
-		pairs := make([]kv, 0, len(rep.TopSlang))
-		for k, v := range rep.TopSlang {
-			pairs = append(pairs, kv{k, v})
-		}
-		sort.Slice(pairs, func(i, j int) bool { return pairs[i].v > pairs[j].v })
-		limit := min(10, len(pairs))
-		for _, p := range pairs[:limit] {
-			fmt.Printf("    %-20s  %d\n", p.k, p.v)
-		}
-		fmt.Println()
+	// Sticker communication style
+	if rep.StickerCount > 0 {
+		fmt.Printf("  Sticker Communication Style: %d outgoing sticker(s)\n", rep.StickerCount)
+		printTopCounts("  Top Sticker Emoticons:", rep.TopStickers, "%s  %d\n")
 	}
 
 	printSeparator()
+}
+
+// printTopCounts renders a count map as a descending top-10 list.
+// Does nothing when the map is empty.
+func printTopCounts(title string, counts map[string]int, lineFormat string) {
+	if len(counts) == 0 {
+		return
+	}
+	type kv struct {
+		k string
+		v int
+	}
+	pairs := make([]kv, 0, len(counts))
+	for k, v := range counts {
+		pairs = append(pairs, kv{k, v})
+	}
+	sort.Slice(pairs, func(i, j int) bool {
+		if pairs[i].v != pairs[j].v {
+			return pairs[i].v > pairs[j].v
+		}
+		return pairs[i].k < pairs[j].k
+	})
+	fmt.Println("  " + title)
+	limit := min(10, len(pairs))
+	for _, p := range pairs[:limit] {
+		fmt.Printf("    "+lineFormat, p.k, p.v)
+	}
+	fmt.Println()
 }

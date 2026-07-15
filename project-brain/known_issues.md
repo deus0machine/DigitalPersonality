@@ -95,10 +95,13 @@
 **Риск**: "свободен" не найдёт "свободного".
 **Решение**: `pg_catalog.russian` конфигурация — Phase 5+.
 
-### KI-013 — TopEmoji и TopSlang не реализованы
-**Проблема**: поля `TopEmoji`, `TopSlang` в PersonalityReport всегда пустые.
-**Текущее поведение**: инициализируются как пустые map, агрегация не написана.
-**Решение**: SQL агрегация по emoji через regexp — следующая итерация.
+### KI-013 — RESOLVED: TopEmoji и TopSlang не реализованы
+**Была проблема**: поля `TopEmoji`, `TopSlang` в PersonalityReport всегда пустые.
+**Решение (2026-07-15, Phase 5.5)**:
+- `fillTopSignals` в retrieval repository: `jsonb_array_elements_text` по `personality_signals`
+  (`emoji_usage`, `slang_markers`), top-10 per chat через `ROW_NUMBER() OVER (PARTITION BY chat_id)`
+- `isEmojiNoise`: фильтрация голых variation selectors / ZWJ / skin tone modifiers,
+  которые extractor отделил от базового эмодзи (покрыто unit-тестом)
 
 ### KI-014 — EpisodeHit без ChatTitle
 **Проблема**: при поиске эпизодов ChatTitle может быть пустым если чат не уперсертирован.
@@ -109,10 +112,9 @@
 
 ## CLI Delivery
 
-### KI-017 — TopEmoji и TopSlang всегда пустые в CLI personality
-**Проблема**: `PersonalityReport.TopEmoji` и `TopSlang` пусты (KI-013).
-**Риск**: пользователь не видит emoji/slang аналитику.
-**Решение**: см. KI-013.
+### KI-017 — RESOLVED: TopEmoji и TopSlang всегда пустые в CLI personality
+**Решено вместе с KI-013 (2026-07-15)**. `personality <chat-id>` показывает Top Emoji,
+Top Slang Markers и новую секцию Sticker Communication Style.
 
 ### KI-018 — personality без аргументов может быть длинным
 **Проблема**: при большом числе чатов вывод длинный.

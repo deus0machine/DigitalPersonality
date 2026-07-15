@@ -285,6 +285,7 @@ func (r *retrievalRepo) fetchReports(ctx context.Context, chatID int64) ([]retri
 		rep.TopEmoji = map[string]int{}
 		rep.LengthClassDist = map[string]int{}
 		rep.TopSlang = map[string]int{}
+		rep.TopStickers = map[string]int{}
 		reports[rep.ChatID] = &rep
 		order = append(order, rep.ChatID)
 	}
@@ -302,6 +303,21 @@ func (r *retrievalRepo) fetchReports(ctx context.Context, chatID int64) ([]retri
 
 	// Writing length distribution.
 	if err := r.fillLengthDist(ctx, chatID, reports); err != nil {
+		return nil, err
+	}
+
+	// Top emoji and slang markers from personality signals.
+	if err := r.fillTopSignals(ctx, chatID, "emoji_usage", reports,
+		func(rep *retrieval.PersonalityReport) map[string]int { return rep.TopEmoji }); err != nil {
+		return nil, err
+	}
+	if err := r.fillTopSignals(ctx, chatID, "slang_markers", reports,
+		func(rep *retrieval.PersonalityReport) map[string]int { return rep.TopSlang }); err != nil {
+		return nil, err
+	}
+
+	// Sticker communication style.
+	if err := r.fillTopStickers(ctx, chatID, reports); err != nil {
 		return nil, err
 	}
 
@@ -382,6 +398,121 @@ func (r *retrievalRepo) fillLengthDist(ctx context.Context, chatID int64, report
 		}
 		if rep, ok := reports[cid]; ok {
 			rep.LengthClassDist[class] = cnt
+		}
+	}
+	return rows.Err()
+}
+
+// fillTopSignals aggregates JSON-array personality signals (emoji_usage, slang_markers)
+// for outgoing messages into per-chat top-10 maps. dest selects the target map on the report.
+func (r *retrievalRepo) fillTopSignals(
+	ctx context.Context,
+	chatID int64,
+	signalType string,
+	reports map[int64]*retrieval.PersonalityReport,
+	dest func(*retrieval.PersonalityReport) map[string]int,
+) error {
+	args := []any{signalType}
+	chatFilter := ""
+	if chatID != 0 {
+		chatFilter = "AND m.chat_id = $2"
+		args = append(args, chatID)
+	}
+	q := fmt.Sprintf(`
+		SELECT chat_id, item, cnt FROM (
+			SELECT m.chat_id, e.item, COUNT(*) AS cnt,
+				ROW_NUMBER() OVER (PARTITION BY m.chat_id ORDER BY COUNT(*) DESC) AS rn
+			FROM personality_signals ps
+			JOIN messages m ON m.id = ps.message_id
+			CROSS JOIN LATERAL jsonb_array_elements_text(ps.value_json) AS e(item)
+			WHERE ps.signal_type = $1
+			  AND m.is_deleted = FALSE AND m.is_outgoing = TRUE
+			  AND m.in_memory_window = TRUE %s
+			GROUP BY m.chat_id, e.item
+		) t WHERE rn <= 10`, chatFilter)
+
+	rows, err := r.pool.Query(ctx, q, args...)
+	if err != nil {
+		return fmt.Errorf("top %s: %w", signalType, err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var cid int64
+		var item string
+		var cnt int
+		if err := rows.Scan(&cid, &item, &cnt); err != nil {
+			return err
+		}
+		if isEmojiNoise(item) {
+			continue
+		}
+		if rep, ok := reports[cid]; ok {
+			dest(rep)[item] = cnt
+		}
+	}
+	return rows.Err()
+}
+
+// isEmojiNoise reports whether an extracted emoji token carries no personality
+// signal on its own: empty strings and bare combining marks (variation selectors,
+// zero-width joiners, skin tone modifiers) that the extractor split off from
+// their base emoji.
+func isEmojiNoise(s string) bool {
+	for _, r := range s {
+		switch {
+		case r == 0xFE0F || r == 0x200D: // variation selector-16, ZWJ
+		case r >= 0x1F3FB && r <= 0x1F3FF: // skin tone modifiers
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// fillTopStickers aggregates outgoing sticker emoticons per chat from raw
+// sticker_meta (Layer 1) — stickers ARE personality signals in this system.
+func (r *retrievalRepo) fillTopStickers(ctx context.Context, chatID int64, reports map[int64]*retrieval.PersonalityReport) error {
+	args := []any{}
+	chatFilter := ""
+	if chatID != 0 {
+		chatFilter = "AND chat_id = $1"
+		args = append(args, chatID)
+	}
+	q := fmt.Sprintf(`
+		SELECT chat_id, emoticon, cnt, total FROM (
+			SELECT chat_id,
+				COALESCE(sticker_meta->>'Emoticon', '') AS emoticon,
+				COUNT(*) AS cnt,
+				SUM(COUNT(*)) OVER (PARTITION BY chat_id) AS total,
+				ROW_NUMBER() OVER (PARTITION BY chat_id ORDER BY COUNT(*) DESC) AS rn
+			FROM messages
+			WHERE media_kind = 'sticker'
+			  AND is_deleted = FALSE AND is_outgoing = TRUE
+			  AND in_memory_window = TRUE %s
+			GROUP BY chat_id, emoticon
+		) t WHERE rn <= 10`, chatFilter)
+
+	rows, err := r.pool.Query(ctx, q, args...)
+	if err != nil {
+		return fmt.Errorf("top stickers: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var cid int64
+		var emoticon string
+		var cnt, total int
+		if err := rows.Scan(&cid, &emoticon, &cnt, &total); err != nil {
+			return err
+		}
+		rep, ok := reports[cid]
+		if !ok {
+			continue
+		}
+		rep.StickerCount = total
+		if emoticon != "" {
+			rep.TopStickers[emoticon] = cnt
 		}
 	}
 	return rows.Err()
