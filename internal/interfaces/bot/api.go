@@ -31,8 +31,17 @@ func newAPIClient(token string) *apiClient {
 }
 
 type user struct {
-	ID       int64  `json:"id"`
-	Username string `json:"username"`
+	ID        int64  `json:"id"`
+	Username  string `json:"username"`
+	FirstName string `json:"first_name"`
+}
+
+// displayName returns the best human-readable label for the user.
+func (u *user) displayName() string {
+	if u.Username != "" {
+		return u.Username
+	}
+	return u.FirstName
 }
 
 type chat struct {

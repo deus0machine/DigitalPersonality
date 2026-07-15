@@ -9,6 +9,7 @@ import (
 	"github.com/digital-personality/internal/application/retrieval"
 	"github.com/digital-personality/internal/application/utterance"
 	"github.com/digital-personality/internal/config"
+	domrepo "github.com/digital-personality/internal/domain/repository"
 	"github.com/digital-personality/internal/infrastructure/ollama"
 	"github.com/digital-personality/internal/infrastructure/postgres"
 	pgrepo "github.com/digital-personality/internal/infrastructure/postgres/repository"
@@ -28,6 +29,7 @@ type Runner struct {
 	vectorSvc     *utterance.RetrievalService // nil when OLLAMA_EMBEDDING_MODEL is empty
 	hybridSvc     *utterance.RetrievalService // nil when OLLAMA_EMBEDDING_MODEL is empty
 	personaSvc    *persona.Service            // nil when OLLAMA_CHAT_MODEL is empty
+	botMsgRepo    domrepo.BotMessageRepository
 	db            *postgres.DB
 }
 
@@ -84,6 +86,7 @@ func New(ctx context.Context, cfg *config.CLIConfig, log *slog.Logger) (*Runner,
 		vectorSvc:     vectorSvc,
 		hybridSvc:     hybridSvc,
 		personaSvc:    personaSvc,
+		botMsgRepo:    pgrepo.NewBotMessageRepository(db.Pool),
 		db:            db,
 	}, nil
 }

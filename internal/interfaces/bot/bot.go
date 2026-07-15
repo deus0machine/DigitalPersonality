@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/digital-personality/internal/application/persona"
+	"github.com/digital-personality/internal/domain/entity"
+	domrepo "github.com/digital-personality/internal/domain/repository"
 )
 
 const (
@@ -38,6 +40,7 @@ const (
 type Bot struct {
 	api     *apiClient
 	persona *persona.Service
+	msgLog  domrepo.BotMessageRepository
 	allowed map[int64]bool // empty = reply to everyone
 	log     *slog.Logger
 
@@ -48,7 +51,8 @@ type Bot struct {
 
 // New creates a Bot. allowedUserIDs restricts who the persona replies to;
 // an empty list means everyone (privacy risk — logged as a warning in Run).
-func New(token string, svc *persona.Service, allowedUserIDs []int64, log *slog.Logger) (*Bot, error) {
+// Every exchanged message is persisted through msgLog (the conversation log).
+func New(token string, svc *persona.Service, msgLog domrepo.BotMessageRepository, allowedUserIDs []int64, log *slog.Logger) (*Bot, error) {
 	if strings.TrimSpace(token) == "" {
 		return nil, fmt.Errorf("TELEGRAM_BOT_TOKEN is not set")
 	}
@@ -59,6 +63,7 @@ func New(token string, svc *persona.Service, allowedUserIDs []int64, log *slog.L
 	return &Bot{
 		api:     newAPIClient(token),
 		persona: svc,
+		msgLog:  msgLog,
 		allowed: allowed,
 		log:     log,
 		history: map[int64][]persona.Turn{},
@@ -125,6 +130,8 @@ func (b *Bot) handleMessage(ctx context.Context, msg *message) {
 		delete(b.history, msg.Chat.ID) // fresh conversation
 	}
 
+	b.record(ctx, msg, false, msg.Text)
+
 	start := time.Now()
 
 	// Keep the typing indicator alive while the persona thinks —
@@ -158,11 +165,28 @@ func (b *Bot) handleMessage(ctx context.Context, msg *message) {
 			return
 		}
 		b.remember(msg.Chat.ID, persona.Turn{FromPersona: true, Text: text})
+		b.record(ctx, msg, true, text)
 	}
 
 	b.log.Info("persona replied",
 		"chat_id", msg.Chat.ID, "user_id", msg.From.ID,
 		"messages", len(reply.Messages), "duration", time.Since(start))
+}
+
+// record persists one exchanged message to the conversation log.
+// Logging failures must never break the conversation — they are reported
+// and the dialog continues.
+func (b *Bot) record(ctx context.Context, msg *message, fromPersona bool, text string) {
+	err := b.msgLog.Save(ctx, &entity.BotMessage{
+		ChatID:      msg.Chat.ID,
+		UserID:      msg.From.ID,
+		Username:    msg.From.displayName(),
+		FromPersona: fromPersona,
+		Text:        text,
+	})
+	if err != nil {
+		b.log.Error("record bot message failed", "chat_id", msg.Chat.ID, "error", err)
+	}
 }
 
 // remember appends a turn to the chat's dialog history, keeping it bounded.

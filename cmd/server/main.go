@@ -11,6 +11,8 @@ import (
 
 	"github.com/digital-personality/internal/app"
 	"github.com/digital-personality/internal/config"
+	"github.com/digital-personality/internal/infrastructure/postgres"
+	pgrepo "github.com/digital-personality/internal/infrastructure/postgres/repository"
 	"github.com/digital-personality/internal/interfaces/bot"
 	"github.com/digital-personality/internal/interfaces/cli"
 )
@@ -50,13 +52,19 @@ func runBot() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// The bot owns a write path (bot_messages) — make sure schema is current.
+	if err := postgres.Migrate(cfg.Postgres.DSN(), "migrations", log); err != nil {
+		return fmt.Errorf("migrate: %w", err)
+	}
+
 	svc, db, err := app.BuildPersonaService(ctx, cfg, log)
 	if err != nil {
 		return fmt.Errorf("build persona: %w", err)
 	}
 	defer db.Close()
 
-	b, err := bot.New(cfg.Bot.Token, svc, cfg.Bot.AllowedUserIDs, log)
+	msgLog := pgrepo.NewBotMessageRepository(db.Pool)
+	b, err := bot.New(cfg.Bot.Token, svc, msgLog, cfg.Bot.AllowedUserIDs, log)
 	if err != nil {
 		return fmt.Errorf("init bot: %w", err)
 	}
@@ -147,6 +155,8 @@ func runCLI(args []string) error {
 		return runner.RetrieveHybrid(ctx, args[1:])
 	case "ask":
 		return runner.Ask(ctx, args[1:])
+	case "bot-log":
+		return runner.BotLog(ctx, args[1:])
 	default:
 		return fmt.Errorf("unknown command %q\n\nUsage:\n"+
 			"  sync                              Run Telegram backfill (default)\n"+
@@ -175,7 +185,8 @@ func runCLI(args []string) error {
 			"  retrieve-vector <query>           Semantic retrieval via pgvector (requires OLLAMA_EMBEDDING_MODEL)\n"+
 			"  retrieve-hybrid <query>           BM25+Rerank and vector fused via RRF (requires OLLAMA_EMBEDDING_MODEL)\n"+
 			"  ask <message>                     Talk to the digital persona (requires OLLAMA_CHAT_MODEL)\n"+
-			"  bot                               Run the Telegram bot: persona answers incoming messages (requires TELEGRAM_BOT_TOKEN)",
+			"  bot                               Run the Telegram bot: persona answers incoming messages (requires TELEGRAM_BOT_TOKEN)\n"+
+			"  bot-log [user-id]                 Show bot conversations: summaries, or one user's dialog",
 			args[0])
 	}
 }
