@@ -89,7 +89,7 @@ func TestReplyPromptCarriesStyleAndMemories(t *testing.T) {
 	svc := NewService(
 		stubRetriever{results: []utterance.SearchResult{
 			memory("мои отношения построены на взаимоуважении", true),
-			memory("а ты как думаешь?", false),
+			memory("Сереж, а ты меня любишь?", false),
 		}},
 		stubStyle{profile: testProfile()},
 		gen,
@@ -107,14 +107,61 @@ func TestReplyPromptCarriesStyleAndMemories(t *testing.T) {
 		}
 	}
 	user := gen.lastReq.User
-	if !strings.Contains(user, "он сам") || !strings.Contains(user, "собеседник") {
-		t.Error("user prompt must label outgoing and incoming memories differently")
+	if !strings.Contains(user, "мои отношения построены") {
+		t.Error("user prompt must contain the person's own memories")
+	}
+	if strings.Contains(user, "Сереж, а ты меня любишь") {
+		t.Error("incoming memories must be filtered out — they make the model impersonate interlocutors")
 	}
 	if !strings.Contains(user, "расскажи про отношения") {
 		t.Error("user prompt must contain the incoming message")
 	}
 	if gen.lastReq.Format == nil {
 		t.Error("generation must request structured JSON output")
+	}
+	if gen.lastReq.MaxTokens == 0 {
+		t.Error("generation must cap output tokens for speed")
+	}
+}
+
+func TestReplyWithHistoryRendersDialog(t *testing.T) {
+	gen := &stubGenerator{output: `{"messages": ["ок"]}`}
+	svc := NewService(stubRetriever{}, stubStyle{profile: testProfile()}, gen, 120)
+
+	history := []Turn{
+		{FromPersona: false, Text: "ну привет"},
+		{FromPersona: true, Text: "прив"},
+		{FromPersona: true, Text: "норм?"},
+	}
+	if _, err := svc.ReplyWithHistory(context.Background(), "что делаешь", history); err != nil {
+		t.Fatal(err)
+	}
+
+	user := gen.lastReq.User
+	if !strings.Contains(user, "Текущий диалог:") {
+		t.Error("user prompt must include the dialog section when history is present")
+	}
+	if !strings.Contains(user, "собеседник: ну привет") || !strings.Contains(user, "он: прив") {
+		t.Error("history turns must be labeled by speaker")
+	}
+	if !strings.Contains(user, "что делаешь") {
+		t.Error("user prompt must contain the current message")
+	}
+}
+
+func TestReplyLimitsMemories(t *testing.T) {
+	var many []utterance.SearchResult
+	for range 30 {
+		many = append(many, memory("моё сообщение", true))
+	}
+	gen := &stubGenerator{output: `{"messages": ["ок"]}`}
+	svc := NewService(stubRetriever{results: many}, stubStyle{profile: testProfile()}, gen, 120)
+
+	if _, err := svc.Reply(context.Background(), "вопрос"); err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(gen.lastReq.User, "моё сообщение"); n != defaultMemoryLimit {
+		t.Errorf("prompt contains %d memories, want %d", n, defaultMemoryLimit)
 	}
 }
 

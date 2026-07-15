@@ -41,6 +41,9 @@ type chatRequest struct {
 	Stream   bool            `json:"stream"`
 	Format   json.RawMessage `json:"format,omitempty"`
 	Options  map[string]any  `json:"options,omitempty"`
+	// KeepAlive keeps the model loaded between requests — reloading a
+	// multi-GB model from disk adds ~10s to the first reply after idle.
+	KeepAlive string `json:"keep_alive,omitempty"`
 }
 
 type chatResponse struct {
@@ -50,17 +53,22 @@ type chatResponse struct {
 
 // Generate runs one stateless chat completion and returns the raw content.
 func (c *ChatClient) Generate(ctx context.Context, req persona.GenerateRequest) (string, error) {
+	options := map[string]any{
+		"temperature": 0.8,
+	}
+	if req.MaxTokens > 0 {
+		options["num_predict"] = req.MaxTokens
+	}
 	body, err := json.Marshal(chatRequest{
 		Model: c.model,
 		Messages: []chatMessage{
 			{Role: "system", Content: req.System},
 			{Role: "user", Content: req.User},
 		},
-		Stream: false,
-		Format: req.Format,
-		Options: map[string]any{
-			"temperature": 0.8,
-		},
+		Stream:    false,
+		Format:    req.Format,
+		Options:   options,
+		KeepAlive: "30m",
 	})
 	if err != nil {
 		return "", fmt.Errorf("marshal ollama chat request: %w", err)

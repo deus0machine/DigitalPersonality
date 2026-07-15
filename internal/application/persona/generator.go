@@ -12,6 +12,8 @@ type GenerateRequest struct {
 	// Format optionally constrains the output to a JSON schema
 	// (supported by Ollama structured outputs). Nil = free text.
 	Format json.RawMessage
+	// MaxTokens caps generation length; 0 = provider default.
+	MaxTokens int
 }
 
 // Generator produces text from a prompt. Implementations are stateless;

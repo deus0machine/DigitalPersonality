@@ -17,8 +17,10 @@ import (
 )
 
 const (
-	// maxTypingPause caps sampled intra-burst pauses so the bot never stalls.
-	maxTypingPause = 10 * time.Second
+	// maxTypingPause caps sampled intra-burst pauses. Generation itself is
+	// slow on CPU, so pauses are kept short — the authentic P50=5s/P90=13s
+	// felt sluggish on top of a 30s generation wait.
+	maxTypingPause = 3 * time.Second
 
 	// typingRefresh re-sends the "typing" action while generating:
 	// Telegram shows the indicator for ~5 seconds per sendChatAction call.
@@ -26,6 +28,10 @@ const (
 
 	// pollErrorBackoff is the wait after a failed getUpdates call.
 	pollErrorBackoff = 5 * time.Second
+
+	// maxHistoryTurns bounds per-chat dialog memory passed to the persona.
+	// In-memory only — history resets on bot restart or /start.
+	maxHistoryTurns = 16
 )
 
 // Bot wires the persona service to the Telegram Bot API.
@@ -34,6 +40,10 @@ type Bot struct {
 	persona *persona.Service
 	allowed map[int64]bool // empty = reply to everyone
 	log     *slog.Logger
+
+	// history holds the live dialog per chat. Accessed only from the
+	// sequential update loop — no locking needed.
+	history map[int64][]persona.Turn
 }
 
 // New creates a Bot. allowedUserIDs restricts who the persona replies to;
@@ -51,6 +61,7 @@ func New(token string, svc *persona.Service, allowedUserIDs []int64, log *slog.L
 		persona: svc,
 		allowed: allowed,
 		log:     log,
+		history: map[int64][]persona.Turn{},
 	}, nil
 }
 
@@ -111,6 +122,7 @@ func (b *Bot) handleMessage(ctx context.Context, msg *message) {
 	query := msg.Text
 	if query == "/start" {
 		query = "привет"
+		delete(b.history, msg.Chat.ID) // fresh conversation
 	}
 
 	start := time.Now()
@@ -119,7 +131,7 @@ func (b *Bot) handleMessage(ctx context.Context, msg *message) {
 	// local generation takes tens of seconds.
 	typingCtx, stopTyping := context.WithCancel(ctx)
 	go b.keepTyping(typingCtx, msg.Chat.ID)
-	reply, err := b.persona.Reply(ctx, query)
+	reply, err := b.persona.ReplyWithHistory(ctx, query, b.history[msg.Chat.ID])
 	stopTyping()
 
 	if err != nil {
@@ -128,6 +140,8 @@ func (b *Bot) handleMessage(ctx context.Context, msg *message) {
 			"duration", time.Since(start), "error", err)
 		return
 	}
+
+	b.remember(msg.Chat.ID, persona.Turn{FromPersona: false, Text: query})
 
 	for i, text := range reply.Messages {
 		if i > 0 {
@@ -143,11 +157,21 @@ func (b *Bot) handleMessage(ctx context.Context, msg *message) {
 			b.log.Error("send message failed", "chat_id", msg.Chat.ID, "error", err)
 			return
 		}
+		b.remember(msg.Chat.ID, persona.Turn{FromPersona: true, Text: text})
 	}
 
 	b.log.Info("persona replied",
 		"chat_id", msg.Chat.ID, "user_id", msg.From.ID,
 		"messages", len(reply.Messages), "duration", time.Since(start))
+}
+
+// remember appends a turn to the chat's dialog history, keeping it bounded.
+func (b *Bot) remember(chatID int64, turn persona.Turn) {
+	h := append(b.history[chatID], turn)
+	if len(h) > maxHistoryTurns {
+		h = h[len(h)-maxHistoryTurns:]
+	}
+	b.history[chatID] = h
 }
 
 // keepTyping refreshes the typing indicator until ctx is cancelled.

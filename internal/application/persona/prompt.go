@@ -72,35 +72,46 @@ func BuildSystemPrompt(profile *StyleProfile) string {
 Правила:
 1. Разбивай ответ на несколько коротких сообщений, как делает он. Каждое сообщение — отдельная строка массива.
 2. Никаких лекций, списков, вежливых формул и тона ассистента.
-3. Опирайся на воспоминания из переписки. Не выдумывай факты о своей жизни, которых там нет.
-4. Если темы нет в воспоминаниях — реагируй как он на незнакомое: коротко и честно, в его манере.
-5. Если всё же делишься знанием, которого нет в воспоминаниях, — подавай его СТРОГО в его манере: те же короткие сообщения, тот же сленг, без умного лекторского тона.
-6. Никогда не упоминай, что ты ИИ, копия или программа.
+3. Его сообщения из прошлых переписок — это ЕГО слова, используй их как образец стиля и источник фактов. Не выдумывай факты о своей жизни, которых там нет.
+4. Реплики собеседника — ЧУЖИЕ слова. Никогда не выдавай их за свои, не повторяй вопрос собеседника и не отвечай его же словами.
+5. Если темы нет в воспоминаниях — реагируй как он на незнакомое: коротко и честно, в его манере.
+6. Если всё же делишься знанием, которого нет в воспоминаниях, — подавай его СТРОГО в его манере: те же короткие сообщения, тот же сленг, без умного лекторского тона.
+7. Двигай диалог вперёд: отвечай на последнее сообщение по сути, не зацикливайся.
+8. Никогда не упоминай, что ты ИИ, копия или программа.
 
 Ответ верни строго в JSON: {"messages": ["первое сообщение", "второе", ...]}
 `)
 	return b.String()
 }
 
-// BuildUserPrompt renders retrieved memories and the incoming message.
-// Outgoing utterances are labeled as the person's own words — they are the
-// strongest style evidence; incoming ones provide conversational context.
-func BuildUserPrompt(query string, memories []utterance.SearchResult) string {
+// BuildUserPrompt renders the person's own past messages (style + facts),
+// the live dialog so far, and the incoming message.
+// memories must be outgoing-only — the caller filters them; feeding
+// interlocutors' lines here makes the model impersonate them.
+func BuildUserPrompt(query string, memories []utterance.SearchResult, history []Turn) string {
 	var b strings.Builder
 
 	if len(memories) > 0 {
-		b.WriteString("Воспоминания из его переписки (могут быть лишь частично релевантными):\n")
+		b.WriteString("Его реальные сообщения из прошлых переписок — образцы стиля и фактов о нём:\n")
 		for i, m := range memories {
-			author := "собеседник"
-			if m.Utterance.IsOutgoing {
-				author = "он сам"
-			}
-			fmt.Fprintf(&b, "%d. [%s, %s, чат «%s»]: %s\n",
-				i+1, author,
+			fmt.Fprintf(&b, "%d. [%s, чат «%s»]: %s\n",
+				i+1,
 				m.Utterance.StartedAt.Format("2006-01"),
 				m.Utterance.ChatTitle,
 				m.Utterance.Text,
 			)
+		}
+		b.WriteString("\n")
+	}
+
+	if len(history) > 0 {
+		b.WriteString("Текущий диалог:\n")
+		for _, t := range history {
+			role := "собеседник"
+			if t.FromPersona {
+				role = "он"
+			}
+			fmt.Fprintf(&b, "%s: %s\n", role, t.Text)
 		}
 		b.WriteString("\n")
 	}

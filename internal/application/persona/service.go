@@ -12,9 +12,27 @@ import (
 )
 
 const (
-	defaultMemoryLimit = 8
+	defaultMemoryLimit = 5
 	maxReplyMessages   = 6
+
+	// memoryOverfetch compensates for the outgoing-only filter: retrieval
+	// returns both directions, but only the person's own messages are safe
+	// to show the model as "his words" — incoming ones caused the persona
+	// to impersonate its interlocutors.
+	memoryOverfetch = 4
+
+	// maxGenerateTokens caps generation length: bursts are short by design,
+	// and shorter generations are dramatically faster on CPU.
+	maxGenerateTokens = 256
 )
+
+// Turn is one entry of the live dialog between the persona and its
+// interlocutor. Delivery layers accumulate turns and pass them back so the
+// persona keeps conversational context (the LLM itself stays stateless).
+type Turn struct {
+	FromPersona bool
+	Text        string
+}
 
 // Retriever fetches ranked memories for a query. Satisfied by
 // utterance.RetrievalService (hybrid, vector, or BM25 — persona is agnostic).
@@ -66,15 +84,34 @@ func NewService(retriever Retriever, style StyleRepository, generator Generator,
 	}
 }
 
-// Reply generates the persona's answer to an incoming message.
+// Reply generates the persona's answer to a standalone incoming message.
 func (s *Service) Reply(ctx context.Context, query string) (*Reply, error) {
+	return s.ReplyWithHistory(ctx, query, nil)
+}
+
+// ReplyWithHistory generates the persona's answer given the live dialog so far.
+// history is ordered oldest-first and must not include the current query.
+func (s *Service) ReplyWithHistory(ctx context.Context, query string, history []Turn) (*Reply, error) {
 	if strings.TrimSpace(query) == "" {
 		return nil, fmt.Errorf("query must not be empty")
 	}
 
-	memories, err := s.retriever.Retrieve(ctx, query, 0, s.memoryLimit)
+	retrieved, err := s.retriever.Retrieve(ctx, query, 0, s.memoryLimit*memoryOverfetch)
 	if err != nil {
 		return nil, fmt.Errorf("retrieve memories: %w", err)
+	}
+
+	// Only the person's own messages go into the prompt: incoming utterances
+	// made the model speak as the interlocutors ("Сереж, а ты меня любишь?").
+	memories := make([]utterance.SearchResult, 0, s.memoryLimit)
+	for _, m := range retrieved {
+		if !m.Utterance.IsOutgoing {
+			continue
+		}
+		memories = append(memories, m)
+		if len(memories) >= s.memoryLimit {
+			break
+		}
 	}
 
 	profile, err := s.style.LoadStyleProfile(ctx, s.burstGapSec)
@@ -83,9 +120,10 @@ func (s *Service) Reply(ctx context.Context, query string) (*Reply, error) {
 	}
 
 	raw, err := s.generator.Generate(ctx, GenerateRequest{
-		System: BuildSystemPrompt(profile),
-		User:   BuildUserPrompt(query, memories),
-		Format: json.RawMessage(replySchema),
+		System:    BuildSystemPrompt(profile),
+		User:      BuildUserPrompt(query, memories, history),
+		Format:    json.RawMessage(replySchema),
+		MaxTokens: maxGenerateTokens,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("generate reply: %w", err)
