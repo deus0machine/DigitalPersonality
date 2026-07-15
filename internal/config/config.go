@@ -134,6 +134,14 @@ type OllamaConfig struct {
 	ChatModel      string `env:"OLLAMA_CHAT_MODEL"      envDefault:""`
 }
 
+// BotConfig configures the Telegram bot delivery layer (Bot API, not MTProto).
+// AllowedUserIDs is a comma-separated allowlist of Telegram user IDs;
+// empty = the bot replies to everyone (logged as a warning on start).
+type BotConfig struct {
+	Token          string  `env:"TELEGRAM_BOT_TOKEN"`
+	AllowedUserIDs []int64 `env:"TELEGRAM_BOT_ALLOWED_USER_IDS" envSeparator:","`
+}
+
 type EmbeddingConfig struct {
 	WorkerCount int           `env:"EMBEDDING_WORKER_COUNT" envDefault:"4"`
 	QueueSize   int           `env:"EMBEDDING_QUEUE_SIZE"   envDefault:"1000"`
@@ -158,6 +166,7 @@ type CLIConfig struct {
 	Utterance UtteranceConfig
 	Rerank    RerankConfig
 	Ollama    OllamaConfig
+	Bot       BotConfig
 }
 
 // LoadCLI parses only the application and database configuration.

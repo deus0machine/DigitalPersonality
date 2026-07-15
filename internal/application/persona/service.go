@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"strings"
+	"time"
 
 	"github.com/digital-personality/internal/application/utterance"
 )
@@ -28,6 +30,18 @@ type Reply struct {
 	// Pacing hints for delivery: realistic pause range between messages.
 	GapP50Seconds float64
 	GapP90Seconds float64
+}
+
+// SamplePause returns a random pause within the persona's real intra-burst
+// pause range [P50, P90], capped at max so delivery never feels stuck.
+// Delivery layers call this between consecutive burst messages.
+func (r *Reply) SamplePause(max time.Duration) time.Duration {
+	p50, p90 := r.GapP50Seconds, r.GapP90Seconds
+	if p90 < p50 {
+		p90 = p50
+	}
+	seconds := p50 + rand.Float64()*(p90-p50)
+	return min(time.Duration(seconds*float64(time.Second)), max)
 }
 
 // Service is the persona use case: retrieve memories → build prompt →

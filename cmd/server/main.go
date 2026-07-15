@@ -4,11 +4,14 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/joho/godotenv"
 
 	"github.com/digital-personality/internal/app"
 	"github.com/digital-personality/internal/config"
+	"github.com/digital-personality/internal/interfaces/bot"
 	"github.com/digital-personality/internal/interfaces/cli"
 )
 
@@ -29,7 +32,35 @@ func run() error {
 	if args[0] == "transcribe" {
 		return runTranscribe()
 	}
+	if args[0] == "bot" {
+		return runBot()
+	}
 	return runCLI(args)
+}
+
+// runBot starts the Telegram bot delivery layer: the digital persona
+// answers incoming messages until interrupted.
+func runBot() error {
+	cfg, err := config.LoadCLI()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	log := app.LoggerFromCfg(&cfg.App)
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	svc, db, err := app.BuildPersonaService(ctx, cfg, log)
+	if err != nil {
+		return fmt.Errorf("build persona: %w", err)
+	}
+	defer db.Close()
+
+	b, err := bot.New(cfg.Bot.Token, svc, cfg.Bot.AllowedUserIDs, log)
+	if err != nil {
+		return fmt.Errorf("init bot: %w", err)
+	}
+	return b.Run(ctx)
 }
 
 // runSync starts the Telegram backfill pipeline (original behavior).
@@ -143,7 +174,8 @@ func runCLI(args []string) error {
 			"  embed-utterances                  Embed utterances via Ollama (requires OLLAMA_EMBEDDING_MODEL)\n"+
 			"  retrieve-vector <query>           Semantic retrieval via pgvector (requires OLLAMA_EMBEDDING_MODEL)\n"+
 			"  retrieve-hybrid <query>           BM25+Rerank and vector fused via RRF (requires OLLAMA_EMBEDDING_MODEL)\n"+
-			"  ask <message>                     Talk to the digital persona (requires OLLAMA_CHAT_MODEL)",
+			"  ask <message>                     Talk to the digital persona (requires OLLAMA_CHAT_MODEL)\n"+
+			"  bot                               Run the Telegram bot: persona answers incoming messages (requires TELEGRAM_BOT_TOKEN)",
 			args[0])
 	}
 }

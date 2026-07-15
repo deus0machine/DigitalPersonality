@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"fmt"
-	"math/rand"
 	"strings"
 	"time"
 )
@@ -36,8 +35,7 @@ func (r *Runner) Ask(ctx context.Context, args []string) error {
 
 	for i, msg := range reply.Messages {
 		if i > 0 {
-			pause := samplePause(reply.GapP50Seconds, reply.GapP90Seconds)
-			time.Sleep(pause)
+			time.Sleep(reply.SamplePause(maxTypingPause))
 		}
 		fmt.Printf("  → %s\n", msg)
 	}
@@ -45,14 +43,4 @@ func (r *Runner) Ask(ctx context.Context, args []string) error {
 	fmt.Printf("\n  (%d message(s), generated in %s)\n\n",
 		len(reply.Messages), time.Since(start).Round(time.Millisecond))
 	return nil
-}
-
-// samplePause picks a pause between p50 and p90 of the person's real
-// intra-burst gaps, capped so CLI usage never feels stuck.
-func samplePause(p50, p90 float64) time.Duration {
-	if p90 < p50 {
-		p90 = p50
-	}
-	seconds := p50 + rand.Float64()*(p90-p50)
-	return min(time.Duration(seconds*float64(time.Second)), maxTypingPause)
 }

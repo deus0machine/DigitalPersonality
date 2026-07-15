@@ -145,14 +145,30 @@
 - Config: `OLLAMA_CHAT_MODEL` (пусто = ask отключён), модель: gemma3:4b
 - Тесты: parsing, prompt content, JSON fallback, message cap, error paths
 
+## Phase 6.1 — Telegram Bot Delivery ✅ (2026-07-15)
+
+**Что реализовано**:
+- `internal/interfaces/bot/`: Bot API delivery (чистый stdlib HTTP, без SDK — как ollama/openai клиенты)
+- `api.go`: минимальный клиент — getMe, getUpdates (long polling 50s), sendMessage, sendChatAction
+- `bot.go`: последовательная обработка, typing-индикатор обновляется каждые 4s во время генерации,
+  бёрст-отправка с паузами `Reply.SamplePause` (cap 10s), `/start` → "привет"
+- `app.BuildPersonaService`: сборка persona-стека в composition root (переиспользуется CLI/bot/HTTP)
+- `persona.Reply.SamplePause`: pacing вынесен из CLI в application — общий для всех delivery
+- Config: `TELEGRAM_BOT_TOKEN` (заимствован из проекта mrBond, бот @FutureBond_Bot),
+  `TELEGRAM_BOT_ALLOWED_USER_IDS` (пусто = отвечает всем, warning в логе)
+- Приватность: текст сообщений НЕ логируется (только user_id/chat_id/duration)
+- Запуск: `go run ./cmd/server bot`
+
 ## Текущее
 
-**Phase 5.3.1, 5.5 и Phase 6 MVP завершены (2026-07-15).** Персона отвечает через `ask`.
+**Phase 5.3.1, 5.5, 6 MVP и 6.1 (бот) завершены (2026-07-15).**
+Персона доступна через CLI `ask` и Telegram-бот @FutureBond_Bot.
 
 Следующие шаги:
-1. Оценить качество ответов gemma3:4b, при слабом русском — попробовать qwen3/mistral-small
-2. Telegram-бот delivery: те же Reply.Messages + sendChatAction("typing") + паузы
+1. Оценить качество ответов gemma3:4b, при слабом русском — попробовать qwen3:8b
+2. Установить TELEGRAM_BOT_ALLOWED_USER_IDS (сейчас бот отвечает всем)
 3. Материализация utterances (KI-027) — перед вторым источником памяти
+4. Multi-turn контекст бота: сейчас каждое сообщение — независимый Reply без истории диалога
 
 ---
 

@@ -212,6 +212,7 @@ _Последнее обновление: 2026-07-15 (Phase 5.3.1 — Hybrid Ret
 | `retrieve-hybrid <query>` | BM25+Rerank + vector через RRF k=60 (требует OLLAMA_EMBEDDING_MODEL) |
 | `retrieve-audit-vector` | BM25 vs Vector vs Hybrid аудит: OVERLAP, NEW%, hybrid состав |
 | `ask <сообщение>` | Разговор с цифровой личностью: бёрст сообщений с паузами (требует OLLAMA_CHAT_MODEL) |
+| `bot` | Telegram-бот @FutureBond_Bot: персона отвечает на входящие (требует TELEGRAM_BOT_TOKEN) |
 
 ### LLM Persona (Phase 6 MVP, 2026-07-15)
 - `application/persona/`: Service + порты Generator/StyleRepository/Retriever
