@@ -123,13 +123,15 @@ type OpenAIConfig struct {
 	BatchSize      int    `env:"OPENAI_EMBEDDING_BATCH_SIZE" envDefault:"100"`
 }
 
-// OllamaConfig configures the local Ollama embedding server.
-// EmbeddingModel must match the model name shown by `ollama list`.
+// OllamaConfig configures the local Ollama server.
+// Model names must match `ollama list`.
 // Set EmbeddingModel to "" to disable vector/embed commands.
+// Set ChatModel to "" to disable the persona `ask` command.
 type OllamaConfig struct {
 	Host           string `env:"OLLAMA_HOST"            envDefault:"http://localhost:11434"`
 	EmbeddingModel string `env:"OLLAMA_EMBEDDING_MODEL" envDefault:"bge-m3"`
 	EmbedBatchSize int    `env:"OLLAMA_EMBED_BATCH_SIZE" envDefault:"10"`
+	ChatModel      string `env:"OLLAMA_CHAT_MODEL"      envDefault:""`
 }
 
 type EmbeddingConfig struct {

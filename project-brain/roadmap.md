@@ -101,31 +101,58 @@
 
 ---
 
-## Текущее
+## Phase 5.3.1 — Hybrid Retrieval ✅ (2026-07-15)
 
-**Phase 5.3 MVP реализована. Embedding infrastructure готова к запуску.**
+**Аудит vector recall (2026-07-15, `retrieve-audit-vector`)**:
+- Корпус: 72,385 эмбеддингов (bge-m3 via Ollama, 1024 dim, gap=120s) — полностью покрыт
+- NEW% = **83%** (83 из 100 vector top-10 результатов отсутствуют в BM25 top-10)
+- Причина: FTS 'simple' без морфологии — vector находит «взаимоотношения» для «отношения»,
+  «универе» для «университет», «умираю» для «смерть»
+- Порог 15% превышен многократно → hybrid подтверждён
 
-Следующий шаг: запустить `embed-utterances`, затем сравнить `retrieve "запрос"` vs `retrieve-vector "запрос"` вручную на тестовых запросах.
-
-По результатам решить:
-- Достаточен ли vector recall → реализовать HybridScorer + RRF + retrieve-audit Hybrid колонку
-- Недостаточен → рассмотреть episode embeddings как основную единицу (Phase 5.4)
+**Что реализовано**:
+- `application/utterance/hybrid.go`: `HybridScorer` — RRF(BM25+Rerank, vector), k=60,
+  фьюжн только по рангам (BM25 score и cosine similarity несравнимы)
+- `retrieve-hybrid <query>` CLI — hybrid retrieval поверх той же `RetrievalService`
+- `retrieve-audit-vector` CLI — BM25 vs Vector vs Hybrid: OVERLAP, NEW%, состав hybrid top-10
+- Wire-up в `runner.go`: `hybridSvc` — nil без `OLLAMA_EMBEDDING_MODEL` (graceful degradation)
 
 ---
 
-## Phase 5.3.1 — Hybrid Retrieval (после аудита vector recall)
+## Phase 6 MVP — LLM Persona ✅ (2026-07-15)
 
-**Цель**: объединить BM25+Rerank и vector search через Reciprocal Rank Fusion.
+**Продуктовые решения** (зафиксированы с пользователем):
+- **Утечка эрудиции разрешена**, но строго в манере персоны: короткие сообщения,
+  сленг, без лекторского тона (правило 5 системного промпта)
+- Ответы — **бёрстами** из нескольких сообщений с паузами «как будто печатает»,
+  калиброванными на реальных данных
+- Будущее расширение: другие источники памяти (соцсети, ИИ-агенты) — требует
+  материализации utterances (KI-027) + source-дискриминатора в messages
 
-**Триггер**: `retrieve-vector` показывает результаты, которых нет в `retrieve` (новые семантические совпадения).
+**Что реализовано**:
+- `application/persona/`: `Service` (retrieve → style → prompt → generate → parse),
+  порты `Generator`, `StyleRepository`, `Retriever` (satisfied by RetrievalService)
+- `prompt.go`: `BuildSystemPrompt` (стиль из профиля + политика знаний),
+  `BuildUserPrompt` (воспоминания с маркировкой «он сам»/«собеседник»)
+- `StyleProfile` из живых данных: length dist (42% tiny/54% short), top slang/emoji,
+  avg burst = 1.89 (P90=3), intra-burst паузы P50=5s / P90=13s
+- `infrastructure/postgres/repository/style.go`: SQL с оконными функциями,
+  burst-семантика идентична `utterance.Build` (incoming рвёт бёрст)
+- `infrastructure/ollama/chat.go`: `ChatClient` → `/api/chat`, structured output
+  (JSON schema `{"messages": [...]}`), temperature 0.8, timeout 5 мин (CPU)
+- CLI `ask "<сообщение>"`: печатает ответ бёрстом с паузами из реального распределения
+  (cap 6s); graceful fallback: битый JSON → одно сообщение, нет embeddings → BM25
+- Config: `OLLAMA_CHAT_MODEL` (пусто = ask отключён), модель: gemma3:4b
+- Тесты: parsing, prompt content, JSON fallback, message cap, error paths
 
-**Что нужно реализовать**:
-- `application/utterance/hybrid.go`: `HybridScorer` — RRF(BM25, vector), k=60
-- `retrieve-audit` расширение: Hybrid колонка + NEW% метрика
-- `CLIConfig.OpenAI` уже подключён — дополнительных config изменений нет
+## Текущее
 
-**Решение об отложенности**: если vector recall слабый (<15% NEW результатов) →
-перейти к Phase 5.4 (episode embeddings) вместо hybrid на utterances.
+**Phase 5.3.1, 5.5 и Phase 6 MVP завершены (2026-07-15).** Персона отвечает через `ask`.
+
+Следующие шаги:
+1. Оценить качество ответов gemma3:4b, при слабом русском — попробовать qwen3/mistral-small
+2. Telegram-бот delivery: те же Reply.Messages + sendChatAction("typing") + паузы
+3. Материализация utterances (KI-027) — перед вторым источником памяти
 
 ---
 
@@ -142,14 +169,17 @@
 
 ---
 
-## Phase 5.5 — Sticker Analytics + Emotional Vocabulary (независимо)
+## Phase 5.5 — Sticker Analytics + Emotional Vocabulary ✅ (2026-07-15)
 
-**Цель**: извлечь personality signals из уже хранящихся sticker_meta без API вызовов.
+**Реализовано** (чистый SQL, без API вызовов и без новых сигналов —
+`sticker_meta` в messages уже source of truth, `sticker_usage` сигналы уже существовали):
+- `PersonalityReport`: `StickerCount` + `TopStickers` (top-10 emoticons per chat, outgoing, in-window)
+- `fillTopStickers`: агрегация `sticker_meta->>'Emoticon'` c оконными функциями
+- KI-013/KI-017 закрыты: `fillTopSignals` — TopEmoji + TopSlang из `personality_signals`
+- CLI `personality <chat-id>`: секция "Sticker Communication Style"
+- Данные: 8,599 in-window стикеров, 8,373 с эмодзи, 7,694 исходящих
 
-- `sticker_meta->>'Emoticon'` → `personality_signals` типа `sticker_emoticon`
-- Aggregation: топ-N эмодзи по чатам, по времени суток
-- PersonalityReport: секция "Sticker Communication Style"
-- Effort: ~2 часа (чистый SQL), нет зависимостей
+**Не делалось**: разбивка стикеров по времени суток — добавить при необходимости.
 
 ---
 

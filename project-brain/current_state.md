@@ -1,6 +1,14 @@
 # Current State
 
-_Последнее обновление: 2026-06-03 (Phase 5.3 MVP — Utterance Embedding Infrastructure)_
+_Последнее обновление: 2026-07-15 (Phase 5.3.1 — Hybrid Retrieval, RRF)_
+
+> **Примечание (2026-07-15):** embedding-провайдер — **Ollama (bge-m3, 1024 dim)**, не OpenAI.
+> Migration 000009 сменила `vector(1536)` → `vector(1024)`. Упоминания OpenAI/1536 ниже — исторические.
+> `infrastructure/openai/client.go` больше не подключён в runner (кандидат на удаление).
+>
+> **Fix (2026-07-15):** `schema_migrations` была dirty на версии 8 (миграцию 9 применяли вручную),
+> из-за чего `sync`/`transcribe` падали на старте. Схема сверена с финалом 000009,
+> выполнено `UPDATE schema_migrations SET version=9, dirty=false`.
 
 ## Реализованные подсистемы
 
@@ -199,14 +207,28 @@ _Последнее обновление: 2026-06-03 (Phase 5.3 MVP — Utteranc
 | `retrieve-context <query>` | Retrieval с контекстным окном |
 | `retrieve-context-debug <query>` | То же + метрики |
 | `retrieve-audit` | BM25 vs BM25+Rerank сравнение (10 queries) |
-| `embed-utterances` | Batch embedding worker (требует OPENAI_API_KEY) |
-| `retrieve-vector <query>` | Semantic retrieval через pgvector (требует OPENAI_API_KEY) |
+| `embed-utterances` | Batch embedding worker (требует OLLAMA_EMBEDDING_MODEL) |
+| `retrieve-vector <query>` | Semantic retrieval через pgvector (требует OLLAMA_EMBEDDING_MODEL) |
+| `retrieve-hybrid <query>` | BM25+Rerank + vector через RRF k=60 (требует OLLAMA_EMBEDDING_MODEL) |
+| `retrieve-audit-vector` | BM25 vs Vector vs Hybrid аудит: OVERLAP, NEW%, hybrid состав |
+| `ask <сообщение>` | Разговор с цифровой личностью: бёрст сообщений с паузами (требует OLLAMA_CHAT_MODEL) |
+
+### LLM Persona (Phase 6 MVP, 2026-07-15)
+- `application/persona/`: Service + порты Generator/StyleRepository/Retriever
+- StyleProfile из живых данных: burst avg 1.89 (P90=3), паузы P50=5s/P90=13s
+- Политика знаний: утечка эрудиции разрешена, но строго в манере персоны
+- `ollama.ChatClient` (gemma3:4b, structured JSON output), `OLLAMA_CHAT_MODEL` в .env
+- Smoke-тесты пройдены: бёрст-формат, опора на память, встречные вопросы работают
+
+### Hybrid Retrieval (Phase 5.3.1, 2026-07-15)
+- `application/utterance/hybrid.go`: `HybridScorer` — RRF по рангам, k=60
+- Аудит 2026-07-15: NEW% = 83% — vector даёт морфологические/семантические совпадения,
+  недоступные FTS 'simple' (KI-012)
+- Эмбеддинги: 72,385 utterances (все ≥10 approx tokens из 231,719), bge-m3, gap=120s
 
 ## Что НЕ реализовано
 
-- **HybridScorer / RRF** — отложено до получения результатов `retrieve-vector` аудита
-- **retrieve-audit Hybrid колонка** — добавляется после подтверждения vector recall
-- **Episode embeddings** — Phase 5.4, после оценки utterance embeddings
+- **Episode embeddings** — Phase 5.4, опционально (hybrid на utterances подтверждён)
 - **HTTP API** — Phase 6
 - **LLM persona simulation** — Phase 6
 - **Real-time updates** — не планируется в текущей архитектуре

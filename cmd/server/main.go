@@ -114,6 +114,8 @@ func runCLI(args []string) error {
 		return runner.RetrieveVector(ctx, args[1:])
 	case "retrieve-hybrid":
 		return runner.RetrieveHybrid(ctx, args[1:])
+	case "ask":
+		return runner.Ask(ctx, args[1:])
 	default:
 		return fmt.Errorf("unknown command %q\n\nUsage:\n"+
 			"  sync                              Run Telegram backfill (default)\n"+
@@ -140,7 +142,8 @@ func runCLI(args []string) error {
 			"  retrieve-audit-vector             Compare BM25+Rerank vs vector on 10 test queries (NEW%%)\n"+
 			"  embed-utterances                  Embed utterances via Ollama (requires OLLAMA_EMBEDDING_MODEL)\n"+
 			"  retrieve-vector <query>           Semantic retrieval via pgvector (requires OLLAMA_EMBEDDING_MODEL)\n"+
-			"  retrieve-hybrid <query>           BM25+Rerank and vector fused via RRF (requires OLLAMA_EMBEDDING_MODEL)",
+			"  retrieve-hybrid <query>           BM25+Rerank and vector fused via RRF (requires OLLAMA_EMBEDDING_MODEL)\n"+
+			"  ask <message>                     Talk to the digital persona (requires OLLAMA_CHAT_MODEL)",
 			args[0])
 	}
 }

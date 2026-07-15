@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/digital-personality/internal/application/persona"
 	"github.com/digital-personality/internal/application/retrieval"
 	"github.com/digital-personality/internal/application/utterance"
 	"github.com/digital-personality/internal/config"
@@ -26,6 +27,7 @@ type Runner struct {
 	embedder      utterance.Embedder          // nil when OLLAMA_EMBEDDING_MODEL is empty
 	vectorSvc     *utterance.RetrievalService // nil when OLLAMA_EMBEDDING_MODEL is empty
 	hybridSvc     *utterance.RetrievalService // nil when OLLAMA_EMBEDDING_MODEL is empty
+	personaSvc    *persona.Service            // nil when OLLAMA_CHAT_MODEL is empty
 	db            *postgres.DB
 }
 
@@ -55,6 +57,21 @@ func New(ctx context.Context, cfg *config.CLIConfig, log *slog.Logger) (*Runner,
 		hybridSvc = utterance.NewRetrievalService(utRepo, hybridScorer, cfg.Utterance)
 	}
 
+	var personaSvc *persona.Service
+	if cfg.Ollama.ChatModel != "" {
+		// Hybrid retrieval when embeddings are available, BM25+Rerank otherwise.
+		var retriever persona.Retriever = utSvc
+		if hybridSvc != nil {
+			retriever = hybridSvc
+		}
+		personaSvc = persona.NewService(
+			retriever,
+			pgrepo.NewStyleRepository(db.Pool),
+			ollama.NewChat(cfg.Ollama.Host, cfg.Ollama.ChatModel),
+			cfg.Utterance.GapSeconds,
+		)
+	}
+
 	return &Runner{
 		svc:           svc,
 		utteranceRepo: utRepo,
@@ -66,6 +83,7 @@ func New(ctx context.Context, cfg *config.CLIConfig, log *slog.Logger) (*Runner,
 		embedder:      embedder,
 		vectorSvc:     vectorSvc,
 		hybridSvc:     hybridSvc,
+		personaSvc:    personaSvc,
 		db:            db,
 	}, nil
 }
