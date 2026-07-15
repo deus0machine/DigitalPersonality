@@ -15,11 +15,15 @@ const (
 	defaultMemoryLimit = 5
 	maxReplyMessages   = 6
 
-	// memoryOverfetch compensates for the outgoing-only filter: retrieval
-	// returns both directions, but only the person's own messages are safe
-	// to show the model as "his words" — incoming ones caused the persona
-	// to impersonate its interlocutors.
-	memoryOverfetch = 4
+	// memoryOverfetch compensates for the outgoing-only and content filters:
+	// retrieval returns both directions and plenty of filler ("ага", "понял"),
+	// but the prompt needs the person's own content-bearing messages —
+	// incoming ones caused impersonation, filler ones caused empty loops.
+	memoryOverfetch = 6
+
+	// minMemoryWords drops filler utterances from the prompt: a memory that
+	// carries no content ("ага, понял") teaches the model nothing but loops.
+	minMemoryWords = 4
 
 	// maxGenerateTokens caps generation length: bursts are short by design,
 	// and shorter generations are dramatically faster on CPU.
@@ -101,11 +105,15 @@ func (s *Service) ReplyWithHistory(ctx context.Context, query string, history []
 		return nil, fmt.Errorf("retrieve memories: %w", err)
 	}
 
-	// Only the person's own messages go into the prompt: incoming utterances
-	// made the model speak as the interlocutors ("Сереж, а ты меня любишь?").
+	// Only the person's own content-bearing messages go into the prompt:
+	// incoming utterances made the model speak as the interlocutors
+	// ("Сереж, а ты меня любишь?"), filler ones fed empty-reply loops.
 	memories := make([]utterance.SearchResult, 0, s.memoryLimit)
 	for _, m := range retrieved {
 		if !m.Utterance.IsOutgoing {
+			continue
+		}
+		if len(strings.Fields(m.Utterance.Text)) < minMemoryWords {
 			continue
 		}
 		memories = append(memories, m)

@@ -152,7 +152,7 @@ func TestReplyWithHistoryRendersDialog(t *testing.T) {
 func TestReplyLimitsMemories(t *testing.T) {
 	var many []utterance.SearchResult
 	for range 30 {
-		many = append(many, memory("моё сообщение", true))
+		many = append(many, memory("вчера ходил в магазин за хлебом", true))
 	}
 	gen := &stubGenerator{output: `{"messages": ["ок"]}`}
 	svc := NewService(stubRetriever{results: many}, stubStyle{profile: testProfile()}, gen, 120)
@@ -160,8 +160,32 @@ func TestReplyLimitsMemories(t *testing.T) {
 	if _, err := svc.Reply(context.Background(), "вопрос"); err != nil {
 		t.Fatal(err)
 	}
-	if n := strings.Count(gen.lastReq.User, "моё сообщение"); n != defaultMemoryLimit {
+	if n := strings.Count(gen.lastReq.User, "вчера ходил в магазин"); n != defaultMemoryLimit {
 		t.Errorf("prompt contains %d memories, want %d", n, defaultMemoryLimit)
+	}
+}
+
+func TestReplyFiltersFillerMemories(t *testing.T) {
+	gen := &stubGenerator{output: `{"messages": ["ок"]}`}
+	svc := NewService(
+		stubRetriever{results: []utterance.SearchResult{
+			memory("ага понял", true), // filler — must be dropped
+			memory("ну смерть так смерть ну главное чтобы нравилось", true),
+		}},
+		stubStyle{profile: testProfile()},
+		gen,
+		120,
+	)
+
+	if _, err := svc.Reply(context.Background(), "вопрос"); err != nil {
+		t.Fatal(err)
+	}
+	user := gen.lastReq.User
+	if strings.Contains(user, "ага понял") {
+		t.Error("filler memories must be filtered — they teach the model empty loops")
+	}
+	if !strings.Contains(user, "ну смерть так смерть") {
+		t.Error("content-bearing memories must survive the filter")
 	}
 }
 

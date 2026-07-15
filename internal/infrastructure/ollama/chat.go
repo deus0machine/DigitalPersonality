@@ -55,6 +55,11 @@ type chatResponse struct {
 func (c *ChatClient) Generate(ctx context.Context, req persona.GenerateRequest) (string, error) {
 	options := map[string]any{
 		"temperature": 0.8,
+		// Penalize token reuse: small models fall into filler loops
+		// ("не суть" × 5) — especially with their own replies in the
+		// dialog history. Kept moderate so JSON syntax stays intact.
+		"repeat_penalty": 1.2,
+		"repeat_last_n":  256,
 	}
 	if req.MaxTokens > 0 {
 		options["num_predict"] = req.MaxTokens
