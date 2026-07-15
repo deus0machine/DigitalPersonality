@@ -127,9 +127,12 @@ func (s *Service) ReplyWithHistory(ctx context.Context, query string, history []
 		return nil, fmt.Errorf("load style profile: %w", err)
 	}
 
+	system := BuildSystemPrompt(profile)
+	userPrompt := BuildUserPrompt(query, memories, history)
+
 	raw, err := s.generator.Generate(ctx, GenerateRequest{
-		System:    BuildSystemPrompt(profile),
-		User:      BuildUserPrompt(query, memories, history),
+		System:    system,
+		User:      userPrompt,
 		Format:    json.RawMessage(replySchema),
 		MaxTokens: maxGenerateTokens,
 	})
@@ -137,7 +140,30 @@ func (s *Service) ReplyWithHistory(ctx context.Context, query string, history []
 		return nil, fmt.Errorf("generate reply: %w", err)
 	}
 
-	messages := parseReplyMessages(raw)
+	parsed := parseReplyMessages(raw)
+	messages := sanitizeMessages(parsed, query, history)
+
+	// Everything the model produced was a repeat of itself or an echo of
+	// the query — retry once with an explicit nudge, then degrade gracefully.
+	if len(messages) == 0 {
+		raw, err = s.generator.Generate(ctx, GenerateRequest{
+			System: system,
+			User: userPrompt + "\n\nВАЖНО: все твои прошлые варианты были повторами. " +
+				"Ответь ЗАНОВО, другими словами, не повторяя ни свои прошлые сообщения, ни сообщение собеседника.",
+			Format:    json.RawMessage(replySchema),
+			MaxTokens: maxGenerateTokens,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("generate retry: %w", err)
+		}
+		parsed = parseReplyMessages(raw)
+		messages = sanitizeMessages(parsed, query, history)
+		if len(messages) == 0 && len(parsed) > 0 {
+			// Still repetitive: send one message rather than nothing.
+			messages = parsed[:1]
+		}
+	}
+
 	if len(messages) == 0 {
 		return nil, fmt.Errorf("generator returned no usable messages")
 	}
@@ -150,6 +176,8 @@ func (s *Service) ReplyWithHistory(ctx context.Context, query string, history []
 }
 
 // parseReplyMessages extracts the message burst from generator output.
+// Array elements containing newlines are split into separate messages —
+// one array element must be one Telegram message.
 // Falls back to treating the whole output as a single message when the
 // model ignored the JSON contract — a degraded reply beats an error.
 func parseReplyMessages(raw string) []string {
@@ -159,8 +187,10 @@ func parseReplyMessages(raw string) []string {
 	if err := json.Unmarshal([]byte(raw), &parsed); err == nil && len(parsed.Messages) > 0 {
 		messages := make([]string, 0, len(parsed.Messages))
 		for _, m := range parsed.Messages {
-			if trimmed := strings.TrimSpace(m); trimmed != "" {
-				messages = append(messages, trimmed)
+			for line := range strings.SplitSeq(m, "\n") {
+				if trimmed := strings.TrimSpace(line); trimmed != "" {
+					messages = append(messages, trimmed)
+				}
 			}
 		}
 		if len(messages) > maxReplyMessages {

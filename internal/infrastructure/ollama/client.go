@@ -31,8 +31,9 @@ func New(host, model string) *Client {
 }
 
 type embedRequest struct {
-	Model string   `json:"model"`
-	Input []string `json:"input"`
+	Model   string         `json:"model"`
+	Input   []string       `json:"input"`
+	Options map[string]any `json:"options,omitempty"`
 }
 
 type embedResponse struct {
@@ -46,7 +47,14 @@ func (c *Client) EmbedTexts(ctx context.Context, texts []string) ([][]float32, e
 		return nil, nil
 	}
 
-	body, err := json.Marshal(embedRequest{Model: c.model, Input: texts})
+	// num_gpu=0 pins the embedder to CPU: it is fast enough there for
+	// query embedding, and 4GB-class GPUs need every megabyte for the
+	// chat model — sharing VRAM pushed chat generation onto the CPU.
+	body, err := json.Marshal(embedRequest{
+		Model:   c.model,
+		Input:   texts,
+		Options: map[string]any{"num_gpu": 0},
+	})
 	if err != nil {
 		return nil, fmt.Errorf("marshal ollama request: %w", err)
 	}

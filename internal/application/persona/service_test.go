@@ -29,13 +29,22 @@ func (s stubStyle) LoadStyleProfile(context.Context, int) (*StyleProfile, error)
 
 type stubGenerator struct {
 	output string
-	err    error
+	// outputs, when set, is returned call-by-call (last one repeats) —
+	// lets tests exercise the anti-repeat retry path.
+	outputs []string
+	err     error
+	calls   int
 	// captured request for prompt assertions
 	lastReq GenerateRequest
 }
 
 func (s *stubGenerator) Generate(_ context.Context, req GenerateRequest) (string, error) {
 	s.lastReq = req
+	s.calls++
+	if len(s.outputs) > 0 {
+		i := min(s.calls-1, len(s.outputs)-1)
+		return s.outputs[i], s.err
+	}
 	return s.output, s.err
 }
 
