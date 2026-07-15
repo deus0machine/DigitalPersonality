@@ -25,6 +25,7 @@ type Runner struct {
 	embeddingRepo utterance.UtteranceEmbeddingRepository
 	embedder      utterance.Embedder          // nil when OLLAMA_EMBEDDING_MODEL is empty
 	vectorSvc     *utterance.RetrievalService // nil when OLLAMA_EMBEDDING_MODEL is empty
+	hybridSvc     *utterance.RetrievalService // nil when OLLAMA_EMBEDDING_MODEL is empty
 	db            *postgres.DB
 }
 
@@ -45,11 +46,13 @@ func New(ctx context.Context, cfg *config.CLIConfig, log *slog.Logger) (*Runner,
 	utSvc := utterance.NewRetrievalService(utRepo, rerank, cfg.Utterance)
 
 	var embedder utterance.Embedder
-	var vectorSvc *utterance.RetrievalService
+	var vectorSvc, hybridSvc *utterance.RetrievalService
 	if cfg.Ollama.EmbeddingModel != "" {
 		embedder = ollama.New(cfg.Ollama.Host, cfg.Ollama.EmbeddingModel)
 		vectorScorer := utterance.NewVectorScorer(embRepo, embedder)
 		vectorSvc = utterance.NewRetrievalService(utRepo, vectorScorer, cfg.Utterance)
+		hybridScorer := utterance.NewHybridScorer(rerank, vectorScorer)
+		hybridSvc = utterance.NewRetrievalService(utRepo, hybridScorer, cfg.Utterance)
 	}
 
 	return &Runner{
@@ -62,6 +65,7 @@ func New(ctx context.Context, cfg *config.CLIConfig, log *slog.Logger) (*Runner,
 		embeddingRepo: embRepo,
 		embedder:      embedder,
 		vectorSvc:     vectorSvc,
+		hybridSvc:     hybridSvc,
 		db:            db,
 	}, nil
 }

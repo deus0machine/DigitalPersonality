@@ -106,10 +106,14 @@ func runCLI(args []string) error {
 		return runner.RetrieveContextDebug(ctx, args[1:])
 	case "retrieve-audit":
 		return runner.RetrieveAudit(ctx, args[1:])
+	case "retrieve-audit-vector":
+		return runner.RetrieveAuditVector(ctx, args[1:])
 	case "embed-utterances":
 		return runner.EmbedUtterances(ctx, args[1:])
 	case "retrieve-vector":
 		return runner.RetrieveVector(ctx, args[1:])
+	case "retrieve-hybrid":
+		return runner.RetrieveHybrid(ctx, args[1:])
 	default:
 		return fmt.Errorf("unknown command %q\n\nUsage:\n"+
 			"  sync                              Run Telegram backfill (default)\n"+
@@ -133,8 +137,10 @@ func runCLI(args []string) error {
 			"  retrieve-context <query>          Retrieval with surrounding utterance context\n"+
 			"  retrieve-context-debug <query>    Same + context token/time metrics\n"+
 			"  retrieve-audit                    Run 10 test queries and report retrieval quality\n"+
-			"  embed-utterances                  Embed utterances via OpenAI (requires OPENAI_API_KEY)\n"+
-			"  retrieve-vector <query>           Semantic retrieval via pgvector (requires OPENAI_API_KEY)",
+			"  retrieve-audit-vector             Compare BM25+Rerank vs vector on 10 test queries (NEW%%)\n"+
+			"  embed-utterances                  Embed utterances via Ollama (requires OLLAMA_EMBEDDING_MODEL)\n"+
+			"  retrieve-vector <query>           Semantic retrieval via pgvector (requires OLLAMA_EMBEDDING_MODEL)\n"+
+			"  retrieve-hybrid <query>           BM25+Rerank and vector fused via RRF (requires OLLAMA_EMBEDDING_MODEL)",
 			args[0])
 	}
 }
